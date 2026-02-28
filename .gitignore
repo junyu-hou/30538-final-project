@@ -1,0 +1,16 @@
+# ---- OS / editor ----
+.DS_Store
+.vscode/
+__pycache__/
+*.pyc
+
+# ---- environments ----
+.venv/
+venv/
+env/
+
+# ---- data ----
+data/raw-data/
+data/derived-data/
+*.zip
+*.7z
