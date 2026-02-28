@@ -10,7 +10,13 @@ venv/
 env/
 
 # ---- data ----
-data/raw-data/
-data/derived-data/
 *.zip
 *.7z
+
+# ignore everything in data folders...
+data/raw-data/*
+data/derived-data/*
+
+# ...but keep the folder structure
+!data/raw-data/.gitkeep
+!data/derived-data/.gitkeep
