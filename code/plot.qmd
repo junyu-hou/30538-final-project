@@ -22,21 +22,21 @@ import altair as alt
 
 ```{python}
 # =========================================================
-# 0) Paths & shared utilities
+# 0) Paths & shared utilities  (RELATIVE PATHS ONLY)
 # =========================================================
 
-def find_repo_root(start: Path | None = None) -> Path:
-    """Find project root by walking up until both data/ and code/ exist."""
-    start = (start or Path.cwd()).resolve()
-    for p in [start] + list(start.parents):
-        if (p / "data").exists() and (p / "code").exists():
-            return p
-    raise FileNotFoundError("Could not find project root (needs both 'data/' and 'code/' folders).")
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import altair as alt
 
 
 def ensure_exists(path: Path, what: str) -> None:
     if not path.exists():
-        raise FileNotFoundError(f"[Missing {what}] Cannot find: {path.resolve()}")
+        # 不用 .resolve()，避免任何绝对路径出现在报错里
+        raise FileNotFoundError(f"[Missing {what}] Cannot find: {path}")
 
 
 def ensure_cols(df: pd.DataFrame, required: list[str], where: str) -> None:
@@ -73,22 +73,30 @@ def save_fig(fig: plt.Figure, outdir: Path, filename: str, dpi: int = 200) -> Pa
     return out
 
 
-# ---- Resolve project paths ----
-REPO = find_repo_root()
-RAW_NTA_SHP = REPO / "data/raw-data/nta_2020/nta_2020.shp"
-DERIVED = REPO / "data/derived-data"
+# ---- RELATIVE repo root anchored at code/ ----
+# 你的 qmd 在 code/ 里，所以项目根目录就是上一级
+REPO = Path("..")
+
+# 可选：做一个“相对结构存在性”检查（仍然是相对路径）
+if not (REPO / "data").is_dir() or not (REPO / "code").is_dir():
+    raise FileNotFoundError(
+        "Expected structure: ../data and ../code (run this QMD from code/)."
+    )
+
+RAW_NTA_SHP = REPO / "data" / "raw-data" / "nta_2020" / "nta_2020.shp"
+DERIVED = REPO / "data" / "derived-data"
 OUTDIR = REPO / "figures"
 
 INCOME_CSV = DERIVED / "nta_income_households_2024.csv"
 SUMMARY_CSV = DERIVED / "nta_inspection_summary.csv"
 INSP_PARQUET = DERIVED / "inspections_with_nta_income.parquet"
 
-print("REPO         =", REPO.resolve())
-print("RAW_NTA_SHP  =", RAW_NTA_SHP.resolve())
-print("INCOME_CSV   =", INCOME_CSV.resolve())
-print("SUMMARY_CSV  =", SUMMARY_CSV.resolve())
-print("INSP_PARQUET =", INSP_PARQUET.resolve())
-print("OUTDIR       =", OUTDIR.resolve())
+print("REPO         =", REPO)
+print("RAW_NTA_SHP  =", RAW_NTA_SHP)
+print("INCOME_CSV   =", INCOME_CSV)
+print("SUMMARY_CSV  =", SUMMARY_CSV)
+print("INSP_PARQUET =", INSP_PARQUET)
+print("OUTDIR       =", OUTDIR)
 ```
 
 
@@ -259,51 +267,84 @@ chart3
 
 ```{python}
 # =========================================================
-# 3) Static plots (scatter + stacked + trend)
+# 3) Static plots (scatter + stacked + trend) -- Altair HTML ONLY
 # =========================================================
 
-def scatter_with_fit(
+def save_chart_html(chart: alt.Chart, outdir: Path, filename: str) -> Path:
+    """
+    Save Altair chart as HTML (always). Return saved path.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / filename
+    chart.save(str(outpath))
+    print("[Saved]", outpath)
+    return outpath
+
+
+def scatter_with_fit_altair(
     d: pd.DataFrame,
     x: str,
     y: str,
     xlabel: str,
     ylabel: str,
     title: str,
-    filename: str,
-    dpi: int = 200,
-) -> dict:
+    out_html: str,
+    x_domain: tuple[float, float] = (10, 13),
+    x_ticks: list[float] = [10, 11, 12, 13],
+    width: int = 600,
+    height: int = 420,
+) -> alt.Chart:
+    """
+    Scatter + OLS regression line (red) using Altair.
+    Force x-axis domain and ticks (for log_income aesthetics).
+    Save as HTML and return the chart (for Quarto display).
+    """
     if x not in d.columns or y not in d.columns:
-        raise ValueError(f"scatter_with_fit needs columns: {x}, {y}")
+        raise ValueError(f"scatter_with_fit_altair needs columns: {x}, {y}")
 
-    mask = np.isfinite(d[x]) & np.isfinite(d[y])
-    dd = d.loc[mask, [x, y]].copy()
+    dd = d[[x, y]].copy()
+    dd[x] = pd.to_numeric(dd[x], errors="coerce")
+    dd[y] = pd.to_numeric(dd[y], errors="coerce")
+    dd = dd[np.isfinite(dd[x]) & np.isfinite(dd[y])].copy()
     if len(dd) < 2:
         raise ValueError(f"Not enough valid rows to plot: {title}")
 
-    z = np.polyfit(dd[x], dd[y], 1)
-    p = np.poly1d(z)
-    dd = dd.sort_values(x)
+    x_enc = alt.X(
+        f"{x}:Q",
+        title=xlabel,
+        scale=alt.Scale(domain=list(x_domain)),
+        axis=alt.Axis(values=x_ticks, format=".0f"),
+    )
 
-    fig = plt.figure(figsize=(7, 5))
-    plt.scatter(dd[x], dd[y], alpha=0.6)
-    plt.plot(dd[x], p(dd[x]), linewidth=2)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title(title)
-    plt.tight_layout()
+    base = alt.Chart(dd).properties(title=title, width=width, height=height)
 
-    outpath = save_fig(fig, OUTDIR, filename, dpi=dpi)
-    plt.show()
-    plt.close(fig)
+    points = base.mark_circle(opacity=0.6).encode(
+        x=x_enc,
+        y=alt.Y(f"{y}:Q", title=ylabel),
+        tooltip=[
+            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.2f"),
+            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.2f"),
+        ],
+    )
 
-    res = {"n": int(len(dd)), "slope": float(z[0]), "intercept": float(z[1]), "path": str(outpath)}
-    print(f"[Saved] {outpath} | N={res['n']} | slope={res['slope']:.4f} | intercept={res['intercept']:.4f}")
-    return res
+    # regression line in red
+    line = base.transform_regression(x, y).mark_line(color="red", strokeWidth=2.5).encode(
+        x=x_enc,
+        y=alt.Y(f"{y}:Q"),
+    )
+
+    chart = (points + line).interactive()
+    save_chart_html(chart, OUTDIR, out_html)
+    return chart
 
 
 # ---- Load summary again ----
 df = pd.read_csv(SUMMARY_CSV).copy()
-ensure_cols(df, ["nta", "median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"], "summary CSV (static plots)")
+ensure_cols(
+    df,
+    ["nta", "median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"],
+    "summary CSV (static plots)",
+)
 df["nta"] = clean_key(df["nta"])
 to_numeric_inplace(df, ["median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"])
 
@@ -313,45 +354,92 @@ df["inspection_intensity"] = df["inspection_intensity"].replace([np.inf, -np.inf
 
 df = safe_log_income(df, "median_income_proxy")
 
-# ---- Scatter 1: income vs intensity ----
-scatter_income_intensity = scatter_with_fit(
+# ---- Scatter 1: log income vs intensity ----
+chart_scatter_income_intensity = scatter_with_fit_altair(
     df,
     x="log_income",
     y="inspection_intensity",
     xlabel="Log Median Household Income (proxy)",
     ylabel="Inspection Intensity (Inspections per Restaurant)",
     title="Income vs Inspection Intensity (NTA)",
-    filename="scatter_income_vs_intensity.png",
+    out_html="scatter_income_vs_intensity.html",
+    x_domain=(10, 13),
+    x_ticks=[10, 11, 12, 13],
 )
 
-# ---- Scatter 2: income vs avg score ----
-scatter_income_score = scatter_with_fit(
+# ---- Scatter 2: log income vs avg score ----
+chart_scatter_income_score = scatter_with_fit_altair(
     df,
     x="log_income",
     y="avg_score",
     xlabel="Log Median Household Income (proxy)",
     ylabel="Average Inspection Score (higher = worse)",
     title="Income vs Average Score (NTA)",
-    filename="scatter_income_vs_score.png",
+    out_html="scatter_income_vs_score.html",
+    x_domain=(10, 13),
+    x_ticks=[10, 11, 12, 13],
 )
 
-# ---- Scatter 3: intensity vs avg score ----
-scatter_intensity_score = scatter_with_fit(
+# ---- Scatter 3: intensity vs avg score (no forced x range here) ----
+def scatter_with_fit_altair_simple(
+    d: pd.DataFrame,
+    x: str,
+    y: str,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    out_html: str,
+    width: int = 600,
+    height: int = 420,
+) -> alt.Chart:
+    dd = d[[x, y]].copy()
+    dd[x] = pd.to_numeric(dd[x], errors="coerce")
+    dd[y] = pd.to_numeric(dd[y], errors="coerce")
+    dd = dd[np.isfinite(dd[x]) & np.isfinite(dd[y])].copy()
+    if len(dd) < 2:
+        raise ValueError(f"Not enough valid rows to plot: {title}")
+
+    base = alt.Chart(dd).properties(title=title, width=width, height=height)
+
+    points = base.mark_circle(opacity=0.6).encode(
+        x=alt.X(f"{x}:Q", title=xlabel),
+        y=alt.Y(f"{y}:Q", title=ylabel),
+        tooltip=[
+            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.2f"),
+            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.2f"),
+        ],
+    )
+
+    line = base.transform_regression(x, y).mark_line(color="red", strokeWidth=2.5).encode(
+        x=alt.X(f"{x}:Q"),
+        y=alt.Y(f"{y}:Q"),
+    )
+
+    chart = (points + line).interactive()
+    save_chart_html(chart, OUTDIR, out_html)
+    return chart
+
+
+chart_scatter_intensity_score = scatter_with_fit_altair_simple(
     df,
     x="inspection_intensity",
     y="avg_score",
     xlabel="Inspection Intensity (Inspections per Restaurant)",
     ylabel="Average Inspection Score (higher = worse)",
     title="Inspection Intensity vs Average Score (NTA)",
-    filename="scatter_intensity_vs_score.png",
+    out_html="scatter_intensity_vs_score.html",
 )
 
-scatter_income_intensity, scatter_income_score, scatter_intensity_score
+# Show in Quarto HTML
+chart_scatter_income_intensity
 
+chart_scatter_income_score
+
+chart_scatter_intensity_score
 
 
 # =========================================================
-# 4) Stacked bar: income quintile vs inspection stage
+# 4) Stacked bar: income quintile vs inspection stage -- Altair HTML ONLY
 # =========================================================
 
 def extract_stage(inspection_type: pd.Series) -> pd.Series:
@@ -372,7 +460,6 @@ insp["median_income_proxy"] = pd.to_numeric(insp["median_income_proxy"], errors=
 insp = insp.dropna(subset=["median_income_proxy", "INSPECTION TYPE"])
 insp = insp[insp["median_income_proxy"] > 0]
 
-# quintiles on inspection-level income proxy
 insp["income_quintile"] = pd.qcut(
     insp["median_income_proxy"],
     5,
@@ -381,37 +468,48 @@ insp["income_quintile"] = pd.qcut(
 
 insp["inspection_stage"] = extract_stage(insp["INSPECTION TYPE"])
 
-# keep top 5 stages
 top_stages = insp["inspection_stage"].value_counts().index[:5]
 insp["inspection_stage"] = insp["inspection_stage"].where(insp["inspection_stage"].isin(top_stages), "Other")
 
-stage_dist = (
+stage_share = (
     insp.groupby(["income_quintile", "inspection_stage"])
     .size()
-    .groupby(level=0)
-    .apply(lambda x: x / x.sum())
-    .unstack(fill_value=0)
+    .reset_index(name="n")
+)
+stage_share["share"] = stage_share.groupby("income_quintile")["n"].transform(lambda s: s / s.sum())
+
+chart_stage = (
+    alt.Chart(stage_share)
+    .mark_bar()
+    .encode(
+        x=alt.X(
+            "income_quintile:N",
+            title="Income Quintile",
+            sort=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"],
+        ),
+        y=alt.Y("share:Q", title="Share of Inspections", axis=alt.Axis(format="%")),
+        color=alt.Color("inspection_stage:N", title="Inspection Stage"),
+        tooltip=[
+            alt.Tooltip("income_quintile:N", title="Income Quintile"),
+            alt.Tooltip("inspection_stage:N", title="Stage"),
+            alt.Tooltip("n:Q", title="Count", format=",.0f"),
+            alt.Tooltip("share:Q", title="Share", format=".2%"),
+        ],
+    )
+    .properties(
+        title="Income Quintile vs Inspection Stage (Stacked Share)",
+        width=700,
+        height=420,
+    )
+    .interactive()
 )
 
-fig = plt.figure(figsize=(8, 6))
-ax = stage_dist.plot(kind="bar", stacked=True, ax=plt.gca())
-ax.set_ylabel("Share of Inspections")
-ax.set_xlabel("Income Quintile")
-ax.set_title("Income Quintile vs Inspection Stage (Stacked Share)")
-ax.legend(title="Inspection Stage", bbox_to_anchor=(1.05, 1), loc="upper left")
-plt.tight_layout()
-
-outpath = save_fig(fig, OUTDIR, "stacked_income_quintile_vs_stage.png")
-plt.show()
-plt.close(fig)
-print("[Saved]", outpath)
-
-stage_dist.head()
-
+save_chart_html(chart_stage, OUTDIR, "stacked_income_quintile_vs_stage.html")
+chart_stage
 
 
 # =========================================================
-# 5) Trend: slope of (intensity ~ log_income) by year
+# 5) Trend: slope of (intensity ~ log_income) by year -- Altair HTML ONLY
 # =========================================================
 
 def get_inspection_date(df: pd.DataFrame) -> pd.Series:
@@ -425,7 +523,6 @@ def get_inspection_date(df: pd.DataFrame) -> pd.Series:
 dfi = pd.read_parquet(INSP_PARQUET).copy()
 dfi["inspection_date"] = get_inspection_date(dfi)
 
-# common cleaning
 dfi = dfi[dfi["inspection_date"].notna()]
 dfi = dfi[dfi["inspection_date"] != pd.Timestamp("1900-01-01")]
 dfi["year"] = dfi["inspection_date"].dt.year
@@ -463,26 +560,36 @@ slopes = pd.DataFrame(results)
 if slopes.empty:
     raise ValueError("No year has enough NTA observations to estimate slopes.")
 
-fig = plt.figure(figsize=(7, 5))
-plt.plot(slopes["year"], slopes["slope"])
-plt.axhline(0)
-plt.xlabel("Year")
-plt.ylabel("Slope of intensity ~ log_income")
-plt.title("Income–Inspection Intensity Relationship Over Time")
-plt.tight_layout()
-
-outpath = save_fig(fig, OUTDIR, "trend_slope_intensity_on_income_by_year.png")
-plt.show()
-plt.close(fig)
-print("[Saved]", outpath)
-
 csvpath = OUTDIR / "trend_slope_intensity_on_income_by_year.csv"
 slopes.to_csv(csvpath, index=False)
 print("[Saved]", csvpath)
 
-slopes
+chart_trend = (
+    alt.Chart(slopes)
+    .mark_line()
+    .encode(
+        x=alt.X("year:O", title="Year"),
+        y=alt.Y("slope:Q", title="Slope of intensity ~ log_income"),
+        tooltip=[
+            alt.Tooltip("year:O", title="Year"),
+            alt.Tooltip("slope:Q", title="Slope", format=",.4f"),
+            alt.Tooltip("n_nta:Q", title="N NTA", format=",.0f"),
+        ],
+    )
+    .properties(
+        title="Income–Inspection Intensity Relationship Over Time",
+        width=700,
+        height=420,
+    )
+)
+
+zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule().encode(y="y:Q")
+
+chart_trend_final = (zero + chart_trend + chart_trend.mark_circle(size=60)).interactive()
+
+save_chart_html(chart_trend_final, OUTDIR, "trend_slope_intensity_on_income_by_year.html")
+chart_trend_final
+
 ```
-
-
 
 
