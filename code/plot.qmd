@@ -1,0 +1,488 @@
+---
+title: "Final Project — Static Plots"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import altair as alt
+```
+
+
+```{python}
+# =========================================================
+# 0) Paths & shared utilities
+# =========================================================
+
+def find_repo_root(start: Path | None = None) -> Path:
+    """Find project root by walking up until both data/ and code/ exist."""
+    start = (start or Path.cwd()).resolve()
+    for p in [start] + list(start.parents):
+        if (p / "data").exists() and (p / "code").exists():
+            return p
+    raise FileNotFoundError("Could not find project root (needs both 'data/' and 'code/' folders).")
+
+
+def ensure_exists(path: Path, what: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"[Missing {what}] Cannot find: {path.resolve()}")
+
+
+def ensure_cols(df: pd.DataFrame, required: list[str], where: str) -> None:
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"[{where}] Missing required columns: {missing}")
+
+
+def clean_key(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.strip()
+
+
+def to_numeric_inplace(df: pd.DataFrame, cols: list[str]) -> None:
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
+def safe_log_income(df: pd.DataFrame, income_col: str = "median_income_proxy") -> pd.DataFrame:
+    df = df.copy()
+    if income_col not in df.columns:
+        raise ValueError(f"Income column '{income_col}' not found.")
+    df[income_col] = pd.to_numeric(df[income_col], errors="coerce")
+    df = df.dropna(subset=[income_col])
+    df = df[df[income_col] > 0]
+    df["log_income"] = np.log(df[income_col])
+    return df
+
+
+def save_fig(fig: plt.Figure, outdir: Path, filename: str, dpi: int = 200) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / filename
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
+    return out
+
+
+# ---- Resolve project paths ----
+REPO = find_repo_root()
+RAW_NTA_SHP = REPO / "data/raw-data/nta_2020/nta_2020.shp"
+DERIVED = REPO / "data/derived-data"
+OUTDIR = REPO / "figures"
+
+INCOME_CSV = DERIVED / "nta_income_households_2024.csv"
+SUMMARY_CSV = DERIVED / "nta_inspection_summary.csv"
+INSP_PARQUET = DERIVED / "inspections_with_nta_income.parquet"
+
+print("REPO         =", REPO.resolve())
+print("RAW_NTA_SHP  =", RAW_NTA_SHP.resolve())
+print("INCOME_CSV   =", INCOME_CSV.resolve())
+print("SUMMARY_CSV  =", SUMMARY_CSV.resolve())
+print("INSP_PARQUET =", INSP_PARQUET.resolve())
+print("OUTDIR       =", OUTDIR.resolve())
+```
+
+
+```{python}
+# =========================================================
+# 1) Load NTA geometry
+# =========================================================
+
+ensure_exists(RAW_NTA_SHP, "NTA shapefile")
+nta_gdf = gpd.read_file(RAW_NTA_SHP)
+
+NTA_CODE_COL = "nta2020"
+ensure_cols(nta_gdf, [NTA_CODE_COL], "NTA shapefile")
+
+nta_gdf = nta_gdf.copy()
+nta_gdf["nta"] = clean_key(nta_gdf[NTA_CODE_COL])
+
+nta_gdf = nta_gdf.to_crs(epsg=4326)
+
+nta_gdf.head(2)
+```
+
+```{python}
+# =========================================================
+# 2) One generic Altair choropleth function
+# =========================================================
+
+def plot_nta_choropleth_altair(
+    gdf: gpd.GeoDataFrame,
+    value_col: str,
+    title: str,
+    legend_title: str,
+    scheme: str = "viridis",
+    tooltip_format: str = ",.2f",
+    output_html: str | None = None,
+    width: int = 700,
+    height: int = 700,
+) -> alt.Chart:
+    if value_col not in gdf.columns:
+        raise ValueError(f"'{value_col}' not in GeoDataFrame columns.")
+
+    geojson = gdf.__geo_interface__
+
+    chart = (
+        alt.Chart(alt.Data(values=geojson["features"]))
+        .mark_geoshape(stroke="white", strokeWidth=0.3)
+        .encode(
+            color=alt.Color(
+                f"properties.{value_col}:Q",
+                title=legend_title,
+                scale=alt.Scale(scheme=scheme),
+            ),
+            tooltip=[
+                alt.Tooltip("properties.nta:N", title="NTA"),
+                alt.Tooltip(
+                    f"properties.{value_col}:Q",
+                    title=legend_title,
+                    format=tooltip_format
+                ),
+            ],
+        )
+        .properties(title=title, width=width, height=height)
+        .project(type="mercator")
+    )
+
+    if output_html is not None:
+        outpath = OUTDIR / output_html
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+        chart.save(str(outpath))
+        print("[Saved]", outpath)
+
+    return chart
+```
+
+
+
+```{python}
+# =========================================================
+# Map 1: NYC NTA Median Household Income
+# =========================================================
+
+ensure_exists(INCOME_CSV, "income CSV")
+income_df = pd.read_csv(INCOME_CSV)
+
+ensure_cols(income_df, ["nta", "median_income_proxy"], "income CSV")
+income_df = income_df.copy()
+income_df["nta"] = clean_key(income_df["nta"])
+to_numeric_inplace(income_df, ["median_income_proxy"])
+
+gdf_income = nta_gdf.merge(income_df[["nta", "median_income_proxy"]], on="nta", how="left")
+print("Share missing income after merge:", f"{gdf_income['median_income_proxy'].isna().mean():.2%}")
+
+chart1 = plot_nta_choropleth_altair(
+    gdf_income,
+    value_col="median_income_proxy",
+    title="NYC NTA Median Household Income (Proxy)",
+    legend_title="Median household income",
+    scheme="viridis",
+    tooltip_format=",.0f",
+    output_html="nta_income_map.html",
+)
+chart1
+```
+
+
+```{python}
+# =========================================================
+# Map 2: NYC NTA Food Safety Risk (Average Inspection Score)
+# =========================================================
+
+ensure_exists(SUMMARY_CSV, "inspection summary CSV")
+summ = pd.read_csv(SUMMARY_CSV)
+
+ensure_cols(summ, ["nta", "avg_score"], "summary CSV")
+summ = summ.copy()
+summ["nta"] = clean_key(summ["nta"])
+to_numeric_inplace(summ, ["avg_score"])
+
+gdf_score = nta_gdf.merge(summ[["nta", "avg_score"]], on="nta", how="left")
+print("Share missing avg_score after merge:", f"{gdf_score['avg_score'].isna().mean():.2%}")
+
+chart2 = plot_nta_choropleth_altair(
+    gdf_score,
+    value_col="avg_score",
+    title="NYC NTA Food Risk (Average Inspection Score)",
+    legend_title="Avg score (higher = worse)",
+    scheme="reds",
+    tooltip_format=",.2f",
+    output_html="nta_avg_score_map.html",
+)
+chart2
+```
+
+
+```{python}
+# =========================================================
+# Map 3: NYC Restaurant Inspection Intensity by NTA
+# =========================================================
+
+ensure_cols(summ, ["nta", "n_inspections", "n_unique_restaurants"], "summary CSV (intensity)")
+to_numeric_inplace(summ, ["n_inspections", "n_unique_restaurants"])
+
+summ["inspection_intensity"] = summ["n_inspections"] / summ["n_unique_restaurants"]
+summ.loc[summ["n_unique_restaurants"] == 0, "inspection_intensity"] = np.nan
+summ["inspection_intensity"] = summ["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
+
+gdf_intensity = nta_gdf.merge(
+    summ[["nta", "inspection_intensity", "n_inspections", "n_unique_restaurants"]],
+    on="nta",
+    how="left",
+)
+print("Share missing intensity after merge:", f"{gdf_intensity['inspection_intensity'].isna().mean():.2%}")
+
+chart3 = plot_nta_choropleth_altair(
+    gdf_intensity,
+    value_col="inspection_intensity",
+    title="NYC Restaurant Inspection Intensity (Inspections per Restaurant)",
+    legend_title="Inspections / restaurant",
+    scheme="viridis",
+    tooltip_format=",.2f",
+    output_html="nta_inspection_intensity_map.html",
+)
+chart3
+```
+
+
+
+
+```{python}
+# =========================================================
+# 3) Static plots (scatter + stacked + trend)
+# =========================================================
+
+def scatter_with_fit(
+    d: pd.DataFrame,
+    x: str,
+    y: str,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    filename: str,
+    dpi: int = 200,
+) -> dict:
+    if x not in d.columns or y not in d.columns:
+        raise ValueError(f"scatter_with_fit needs columns: {x}, {y}")
+
+    mask = np.isfinite(d[x]) & np.isfinite(d[y])
+    dd = d.loc[mask, [x, y]].copy()
+    if len(dd) < 2:
+        raise ValueError(f"Not enough valid rows to plot: {title}")
+
+    z = np.polyfit(dd[x], dd[y], 1)
+    p = np.poly1d(z)
+    dd = dd.sort_values(x)
+
+    fig = plt.figure(figsize=(7, 5))
+    plt.scatter(dd[x], dd[y], alpha=0.6)
+    plt.plot(dd[x], p(dd[x]), linewidth=2)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.tight_layout()
+
+    outpath = save_fig(fig, OUTDIR, filename, dpi=dpi)
+    plt.show()
+    plt.close(fig)
+
+    res = {"n": int(len(dd)), "slope": float(z[0]), "intercept": float(z[1]), "path": str(outpath)}
+    print(f"[Saved] {outpath} | N={res['n']} | slope={res['slope']:.4f} | intercept={res['intercept']:.4f}")
+    return res
+
+
+# ---- Load summary again ----
+df = pd.read_csv(SUMMARY_CSV).copy()
+ensure_cols(df, ["nta", "median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"], "summary CSV (static plots)")
+df["nta"] = clean_key(df["nta"])
+to_numeric_inplace(df, ["median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"])
+
+df["inspection_intensity"] = df["n_inspections"] / df["n_unique_restaurants"]
+df.loc[df["n_unique_restaurants"] == 0, "inspection_intensity"] = np.nan
+df["inspection_intensity"] = df["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
+
+df = safe_log_income(df, "median_income_proxy")
+
+# ---- Scatter 1: income vs intensity ----
+scatter_income_intensity = scatter_with_fit(
+    df,
+    x="log_income",
+    y="inspection_intensity",
+    xlabel="Log Median Household Income (proxy)",
+    ylabel="Inspection Intensity (Inspections per Restaurant)",
+    title="Income vs Inspection Intensity (NTA)",
+    filename="scatter_income_vs_intensity.png",
+)
+
+# ---- Scatter 2: income vs avg score ----
+scatter_income_score = scatter_with_fit(
+    df,
+    x="log_income",
+    y="avg_score",
+    xlabel="Log Median Household Income (proxy)",
+    ylabel="Average Inspection Score (higher = worse)",
+    title="Income vs Average Score (NTA)",
+    filename="scatter_income_vs_score.png",
+)
+
+# ---- Scatter 3: intensity vs avg score ----
+scatter_intensity_score = scatter_with_fit(
+    df,
+    x="inspection_intensity",
+    y="avg_score",
+    xlabel="Inspection Intensity (Inspections per Restaurant)",
+    ylabel="Average Inspection Score (higher = worse)",
+    title="Inspection Intensity vs Average Score (NTA)",
+    filename="scatter_intensity_vs_score.png",
+)
+
+scatter_income_intensity, scatter_income_score, scatter_intensity_score
+
+
+
+# =========================================================
+# 4) Stacked bar: income quintile vs inspection stage
+# =========================================================
+
+def extract_stage(inspection_type: pd.Series) -> pd.Series:
+    split = inspection_type.astype(str).str.split("/", n=1, expand=True)
+    if split.shape[1] == 2:
+        stage = split[1].str.strip()
+        stage = stage.where(stage.notna() & (stage != ""), "Unknown")
+        return stage
+    return pd.Series(["Unknown"] * len(inspection_type), index=inspection_type.index)
+
+
+ensure_exists(INSP_PARQUET, "inspections parquet")
+insp = pd.read_parquet(INSP_PARQUET).copy()
+
+ensure_cols(insp, ["median_income_proxy", "INSPECTION TYPE"], "inspections parquet (stacked stage)")
+
+insp["median_income_proxy"] = pd.to_numeric(insp["median_income_proxy"], errors="coerce")
+insp = insp.dropna(subset=["median_income_proxy", "INSPECTION TYPE"])
+insp = insp[insp["median_income_proxy"] > 0]
+
+# quintiles on inspection-level income proxy
+insp["income_quintile"] = pd.qcut(
+    insp["median_income_proxy"],
+    5,
+    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"],
+)
+
+insp["inspection_stage"] = extract_stage(insp["INSPECTION TYPE"])
+
+# keep top 5 stages
+top_stages = insp["inspection_stage"].value_counts().index[:5]
+insp["inspection_stage"] = insp["inspection_stage"].where(insp["inspection_stage"].isin(top_stages), "Other")
+
+stage_dist = (
+    insp.groupby(["income_quintile", "inspection_stage"])
+    .size()
+    .groupby(level=0)
+    .apply(lambda x: x / x.sum())
+    .unstack(fill_value=0)
+)
+
+fig = plt.figure(figsize=(8, 6))
+ax = stage_dist.plot(kind="bar", stacked=True, ax=plt.gca())
+ax.set_ylabel("Share of Inspections")
+ax.set_xlabel("Income Quintile")
+ax.set_title("Income Quintile vs Inspection Stage (Stacked Share)")
+ax.legend(title="Inspection Stage", bbox_to_anchor=(1.05, 1), loc="upper left")
+plt.tight_layout()
+
+outpath = save_fig(fig, OUTDIR, "stacked_income_quintile_vs_stage.png")
+plt.show()
+plt.close(fig)
+print("[Saved]", outpath)
+
+stage_dist.head()
+
+
+
+# =========================================================
+# 5) Trend: slope of (intensity ~ log_income) by year
+# =========================================================
+
+def get_inspection_date(df: pd.DataFrame) -> pd.Series:
+    if "inspection_date" in df.columns:
+        return pd.to_datetime(df["inspection_date"], errors="coerce")
+    if "INSPECTION DATE" in df.columns:
+        return pd.to_datetime(df["INSPECTION DATE"], errors="coerce")
+    raise ValueError("Need 'inspection_date' or 'INSPECTION DATE' column.")
+
+
+dfi = pd.read_parquet(INSP_PARQUET).copy()
+dfi["inspection_date"] = get_inspection_date(dfi)
+
+# common cleaning
+dfi = dfi[dfi["inspection_date"].notna()]
+dfi = dfi[dfi["inspection_date"] != pd.Timestamp("1900-01-01")]
+dfi["year"] = dfi["inspection_date"].dt.year
+
+ensure_cols(dfi, ["nta", "CAMIS", "median_income_proxy"], "inspections parquet (trend slope)")
+dfi["nta"] = clean_key(dfi["nta"])
+dfi["median_income_proxy"] = pd.to_numeric(dfi["median_income_proxy"], errors="coerce")
+dfi = dfi.dropna(subset=["nta", "CAMIS", "median_income_proxy"])
+dfi = dfi[dfi["median_income_proxy"] > 0]
+dfi["log_income"] = np.log(dfi["median_income_proxy"])
+
+nta_year = (
+    dfi.groupby(["year", "nta"], as_index=False)
+    .agg(
+        n_inspections=("CAMIS", "size"),
+        n_unique_restaurants=("CAMIS", "nunique"),
+        log_income=("log_income", "first"),
+    )
+)
+nta_year["inspection_intensity"] = nta_year["n_inspections"] / nta_year["n_unique_restaurants"]
+nta_year = nta_year[
+    np.isfinite(nta_year["inspection_intensity"]) & np.isfinite(nta_year["log_income"])
+].copy()
+
+min_nta = 30
+results = []
+for year in sorted(nta_year["year"].unique()):
+    sub = nta_year[nta_year["year"] == year]
+    if len(sub) < min_nta:
+        continue
+    z = np.polyfit(sub["log_income"], sub["inspection_intensity"], 1)
+    results.append({"year": int(year), "slope": float(z[0]), "n_nta": int(len(sub))})
+
+slopes = pd.DataFrame(results)
+if slopes.empty:
+    raise ValueError("No year has enough NTA observations to estimate slopes.")
+
+fig = plt.figure(figsize=(7, 5))
+plt.plot(slopes["year"], slopes["slope"])
+plt.axhline(0)
+plt.xlabel("Year")
+plt.ylabel("Slope of intensity ~ log_income")
+plt.title("Income–Inspection Intensity Relationship Over Time")
+plt.tight_layout()
+
+outpath = save_fig(fig, OUTDIR, "trend_slope_intensity_on_income_by_year.png")
+plt.show()
+plt.close(fig)
+print("[Saved]", outpath)
+
+csvpath = OUTDIR / "trend_slope_intensity_on_income_by_year.csv"
+slopes.to_csv(csvpath, index=False)
+print("[Saved]", csvpath)
+
+slopes
+```
+
+
+
+
