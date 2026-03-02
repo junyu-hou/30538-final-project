@@ -35,7 +35,6 @@ import altair as alt
 
 def ensure_exists(path: Path, what: str) -> None:
     if not path.exists():
-        # 不用 .resolve()，避免任何绝对路径出现在报错里
         raise FileNotFoundError(f"[Missing {what}] Cannot find: {path}")
 
 
@@ -73,11 +72,8 @@ def save_fig(fig: plt.Figure, outdir: Path, filename: str, dpi: int = 200) -> Pa
     return out
 
 
-# ---- RELATIVE repo root anchored at code/ ----
-# 你的 qmd 在 code/ 里，所以项目根目录就是上一级
 REPO = Path("..")
 
-# 可选：做一个“相对结构存在性”检查（仍然是相对路径）
 if not (REPO / "data").is_dir() or not (REPO / "code").is_dir():
     raise FileNotFoundError(
         "Expected structure: ../data and ../code (run this QMD from code/)."

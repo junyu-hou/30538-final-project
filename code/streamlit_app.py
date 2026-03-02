@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import zipfile
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,8 @@ import geopandas as gpd
 import altair as alt
 import streamlit as st
 import pydeck as pdk
+
+import requests
 
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
@@ -51,19 +54,95 @@ def get_inspection_date(df: pd.DataFrame) -> pd.Series:
     raise ValueError("Need 'inspection_date' or 'INSPECTION DATE' column.")
 
 
-# =========================================================
-# 1) Paths  (STRICTLY RELATIVE)
-# =========================================================
-if Path("data").exists() and Path("code").exists():
-    REPO = Path(".")
-else:
-    REPO = Path("..")
+def download_file(url: str, dst: Path, label: str = "") -> None:
+    """Download url -> dst if dst missing/empty. Streams with progress bar."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
 
-RAW_NTA_SHP = REPO / "data" / "raw-data" / "nta_2020" / "nta_2020.shp"
+    if dst.exists() and dst.stat().st_size > 0:
+        return
+
+    with st.spinner(f"Downloading {label or dst.name} ..."):
+        r = requests.get(url, stream=True, timeout=180)
+        r.raise_for_status()
+
+        total = int(r.headers.get("Content-Length", 0))
+        downloaded = 0
+        progress = st.progress(0) if total > 0 else None
+
+        tmp = dst.with_suffix(dst.suffix + ".part")
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1MB
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress is not None:
+                    progress.progress(min(downloaded / total, 1.0))
+
+        tmp.replace(dst)
+        if progress is not None:
+            progress.empty()
+
+
+def download_and_extract_zip(url: str, zip_dst: Path, extract_to: Path, label: str = "") -> None:
+    """
+    Download zip -> zip_dst, then extract into extract_to.
+    Safe to call repeatedly (will skip extract if target shp exists).
+    """
+    extract_to.mkdir(parents=True, exist_ok=True)
+
+    # If we already have a shp somewhere inside extract_to, skip.
+    if any(extract_to.rglob("*.shp")):
+        return
+
+    download_file(url, zip_dst, label=label or zip_dst.name)
+
+    with st.spinner(f"Extracting {label or zip_dst.name} ..."):
+        with zipfile.ZipFile(zip_dst, "r") as zf:
+            zf.extractall(extract_to)
+
+
+def find_shapefile(root: Path, preferred_name: str = "nta_2020.shp") -> Path:
+    """
+    Find a .shp under root. Prefer exact file name if present.
+    Works whether the zip contains a folder or just files.
+    """
+    exact = list(root.rglob(preferred_name))
+    if exact:
+        return exact[0]
+
+    any_shp = list(root.rglob("*.shp"))
+    if any_shp:
+        return any_shp[0]
+
+    raise FileNotFoundError(f"Cannot find any .shp under {root}")
+
+
+# =========================================================
+# 1) Paths
+# =========================================================
+THIS_FILE = Path(__file__).resolve()
+REPO = THIS_FILE.parents[1]  # .../final_project (because this file is in .../final_project/code/)
+
 DERIVED = REPO / "data" / "derived-data"
+RAW_DIR = REPO / "data" / "raw-data"
+NTA_DIR = RAW_DIR / "nta_2020"
 
 SUMMARY_CSV = DERIVED / "nta_inspection_summary.csv"
 INSP_PARQUET = DERIVED / "inspections_with_nta_income.parquet"
+
+# NOTE: RAW_NTA_SHP will be determined after ensuring data exists
+RAW_NTA_SHP: Path | None = None
+
+
+# =========================================================
+# 1.5) Remote data URLs
+# =========================================================
+DATA_URLS = {
+    "INSP_PARQUET": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/inspections_with_nta_income.parquet",
+    "SUMMARY_CSV": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/nta_inspection_summary.csv",
+    "NTA_ZIP": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/nta_2020.zip",
+}
 
 
 # =========================================================
@@ -75,7 +154,29 @@ st.caption("Left: NTA choropleth (PyDeck + CARTO basemap) | Right: scatter | Bot
 
 
 # =========================================================
-# 3) Cached loaders
+# 3) Ensure data exists (download if missing)
+# =========================================================
+try:
+    # Derived data
+    if not SUMMARY_CSV.exists():
+        download_file(DATA_URLS["SUMMARY_CSV"], SUMMARY_CSV, "summary CSV")
+
+    if not INSP_PARQUET.exists():
+        download_file(DATA_URLS["INSP_PARQUET"], INSP_PARQUET, "inspections parquet")
+
+    if not any(NTA_DIR.rglob("*.shp")):
+        zip_dst = RAW_DIR / "nta_2020.zip"
+        download_and_extract_zip(DATA_URLS["NTA_ZIP"], zip_dst, NTA_DIR, "NTA shapefile zip")
+
+    RAW_NTA_SHP = find_shapefile(NTA_DIR, preferred_name="nta_2020.shp")
+
+except Exception as e:
+    st.error(f"Data download/setup failed: {e}")
+    st.stop()
+
+
+# =========================================================
+# 4) Cached loaders
 # =========================================================
 @st.cache_data(show_spinner=False)
 def load_nta_geometry(shp_path: str) -> gpd.GeoDataFrame:
@@ -83,8 +184,15 @@ def load_nta_geometry(shp_path: str) -> gpd.GeoDataFrame:
     ensure_exists(shp, "NTA shapefile")
 
     gdf = gpd.read_file(shp).copy()
-    nta_code_col = "nta2020"
-    ensure_cols(gdf, [nta_code_col], "NTA shapefile")
+
+    candidates = ["nta2020", "NTA2020", "nta", "NTA"]
+    nta_code_col = None
+    for c in candidates:
+        if c in gdf.columns:
+            nta_code_col = c
+            break
+    if nta_code_col is None:
+        raise ValueError(f"[NTA shapefile] Cannot find NTA code column among {candidates}. Columns: {list(gdf.columns)[:30]}")
 
     gdf["nta"] = clean_key(gdf[nta_code_col])
     gdf = gdf.to_crs(epsg=4326)
@@ -139,6 +247,7 @@ def load_inspections(insp_parquet: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def build_yearly_nta_panel(_insp_df: pd.DataFrame) -> pd.DataFrame:
+    # NOTE: leading underscore avoids Streamlit hashing issues on some versions
     nta_year = (
         _insp_df.groupby(["year", "nta"], as_index=False)
         .agg(
@@ -155,7 +264,7 @@ def build_yearly_nta_panel(_insp_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# 4) Transforms
+# 5) Transforms
 # =========================================================
 def make_map_gdf(nta_gdf: gpd.GeoDataFrame, summary_df: pd.DataFrame) -> gpd.GeoDataFrame:
     keep = ["nta", "median_income_proxy", "log_income", "avg_score", "inspection_intensity"]
@@ -163,7 +272,7 @@ def make_map_gdf(nta_gdf: gpd.GeoDataFrame, summary_df: pd.DataFrame) -> gpd.Geo
 
 
 # =========================================================
-# 5) PyDeck choropleth (CARTO basemap, no token) + tooltip
+# 6) PyDeck choropleth (CARTO basemap, no token) + tooltip
 # =========================================================
 def choropleth_pydeck(
     gdf: gpd.GeoDataFrame,
@@ -225,8 +334,6 @@ def choropleth_pydeck(
 
     view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=9.3)
 
-    # IMPORTANT: For many pydeck builds, tooltip variables work as {field} (not {properties.field})
-    # Since GeoJSON properties are available as top-level keys in tooltip templating, use {nta} and {value_str}.
     tooltip = {
         "html": (
             "<b>NTA:</b> {nta}<br/>"
@@ -235,8 +342,6 @@ def choropleth_pydeck(
         "style": {"backgroundColor": "white", "color": "black"},
     }
 
-    # CARTO basemap (no Mapbox token needed)
-    # If your pydeck build doesn’t accept these, it will gracefully fall back to no basemap.
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
@@ -260,7 +365,7 @@ def render_colorbar_vertical(vmin: float, vmax: float, cmap_name: str, label: st
 
 
 # =========================================================
-# 6) Altair scatter
+# 7) Altair scatter
 # =========================================================
 def scatter_altair(
     df: pd.DataFrame,
@@ -301,10 +406,12 @@ def scatter_altair(
 
     return (base + reg).properties(**props)
 
+
 # =========================================================
-# 7) Load data
+# 8) Load data
 # =========================================================
 with st.spinner("Loading data..."):
+    assert RAW_NTA_SHP is not None
     nta_gdf = load_nta_geometry(str(RAW_NTA_SHP))
     summary_df = load_summary(str(SUMMARY_CSV))
     insp_df = load_inspections(str(INSP_PARQUET))
@@ -314,7 +421,7 @@ map_gdf = make_map_gdf(nta_gdf, summary_df)
 
 
 # =========================================================
-# 8) Layout
+# 9) Layout
 # =========================================================
 col_left, col_right = st.columns([1, 1], gap="large")
 
@@ -322,19 +429,19 @@ with col_left:
     st.subheader("NTA Map")
 
     map_metric = st.selectbox(
-    "Select metric to display",
-    options=[
-        "Income (Median Household Income)",
-        "Food Risk (Average Inspection Score)",
-        "Enforcement (Inspection Intensity)",
-    ],
-    index=0,
-)
+        "Select metric to display",
+        options=[
+            "Income (Median Household Income)",
+            "Food Risk (Average Inspection Score)",
+            "Enforcement (Inspection Intensity)",
+        ],
+        index=0,
+    )
 
     if map_metric == "Income (Median Household Income)":
         value_col = "median_income_proxy"
         title = "NYC NTA Median Household Income"
-        legend = "Median household income ($)"   
+        legend = "Median household income ($)"
         cmap_name = "viridis"
 
     elif map_metric == "Food Risk (Average Inspection Score)":
@@ -389,8 +496,7 @@ with col_right:
         index=1,
     )
 
-    x_domain = (10.0, 13) if x == "log_income" else None
-
+    x_domain = (10.0, 13.0) if x == "log_income" else None
     chart_title = f"{VAR_LABELS[y]} vs {VAR_LABELS[x]} (NTA)"
 
     st.altair_chart(
@@ -408,15 +514,10 @@ with col_right:
 
 
 # =========================================================
-# 9) Year slider
+# 10) Year slider
 # =========================================================
 st.divider()
 st.subheader("Over time: Income vs Enforcement Intensity (by year)")
-
-VAR_LABELS = {
-    "log_income": "Log Median Household Income",
-    "inspection_intensity": "Inspection Intensity (Inspections per Restaurant)",
-}
 
 years = sorted([int(y) for y in nta_year["year"].dropna().unique()])
 
@@ -434,11 +535,9 @@ if years:
     st.caption(f"Year = {year} | NTA rows = {len(sub):,}")
 
     st.markdown(
-        f"**{VAR_LABELS['inspection_intensity']} vs {VAR_LABELS['log_income']} (NTA)**  \n"
+        f"**Inspection Intensity (Inspections per Restaurant) vs Log Median Household Income (NTA)**  \n"
         f"Year: **{year}**"
     )
-
-    x_domain = (10.0, 13.0)
 
     st.altair_chart(
         scatter_altair(
@@ -446,14 +545,13 @@ if years:
             x="log_income",
             y="inspection_intensity",
             title="",
-            x_label=VAR_LABELS["log_income"],
-            y_label=VAR_LABELS["inspection_intensity"],
-            x_domain=x_domain,
+            x_label="Log Median Household Income",
+            y_label="Inspection Intensity (Inspections per Restaurant)",
+            x_domain=(10.0, 13.0),
             width=1100,
             height=380,
         ),
         use_container_width=True,
     )
-
 else:
     st.warning("No valid years found (check inspection_date cleaning).")
