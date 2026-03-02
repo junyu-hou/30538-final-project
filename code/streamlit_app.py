@@ -138,9 +138,9 @@ def load_inspections(insp_parquet: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def build_yearly_nta_panel(insp_df: pd.DataFrame) -> pd.DataFrame:
+def build_yearly_nta_panel(_insp_df: pd.DataFrame) -> pd.DataFrame:
     nta_year = (
-        insp_df.groupby(["year", "nta"], as_index=False)
+        _insp_df.groupby(["year", "nta"], as_index=False)
         .agg(
             n_inspections=("CAMIS", "size"),
             n_unique_restaurants=("CAMIS", "nunique"),
