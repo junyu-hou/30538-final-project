@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    #vis.vega-embed {
+      width: 100%;
+      display: flex;
+    }
+
+    #vis.vega-embed details,
+    #vis.vega-embed details summary {
+      position: relative;
+    }
+  </style>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega@6"></script>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega-lite@6.1.0"></script>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega-embed@7"></script>
+</head>
+<body>
+  <div id="vis"></div>
+  <script>
+    (function(vegaEmbed) {
+      var spec = {"config": {"view": {"continuousWidth": 300, "continuousHeight": 300}}, "layer": [{"data": {"name": "data-a0a55d106695e8d630baff0f16eee66d"}, "mark": {"type": "rule"}, "encoding": {"y": {"field": "y", "type": "quantitative"}}, "name": "view_7e47a41ccfe0cbda_0"}, {"data": {"name": "data-b51c1c018df4c5c9a3b1721f09efcf4f"}, "mark": {"type": "line"}, "encoding": {"tooltip": [{"field": "year", "title": "Year", "type": "ordinal"}, {"field": "slope", "format": ",.4f", "title": "Slope", "type": "quantitative"}, {"field": "n_nta", "format": ",.0f", "title": "N NTA", "type": "quantitative"}], "x": {"field": "year", "title": "Year", "type": "ordinal"}, "y": {"field": "slope", "title": "Slope of intensity ~ log_income", "type": "quantitative"}}, "title": "Income\u2013Inspection Intensity Relationship Over Time"}, {"data": {"name": "data-b51c1c018df4c5c9a3b1721f09efcf4f"}, "mark": {"type": "circle", "size": 60}, "encoding": {"tooltip": [{"field": "year", "title": "Year", "type": "ordinal"}, {"field": "slope", "format": ",.4f", "title": "Slope", "type": "quantitative"}, {"field": "n_nta", "format": ",.0f", "title": "N NTA", "type": "quantitative"}], "x": {"field": "year", "title": "Year", "type": "ordinal"}, "y": {"field": "slope", "title": "Slope of intensity ~ log_income", "type": "quantitative"}}, "title": "Income\u2013Inspection Intensity Relationship Over Time"}], "height": 420, "params": [{"name": "param_1e9efca18e7a2868", "select": {"type": "interval", "encodings": ["x", "y"]}, "bind": "scales", "views": ["view_7e47a41ccfe0cbda_0"]}], "width": 700, "$schema": "https://vega.github.io/schema/vega-lite/v6.1.0.json", "datasets": {"data-a0a55d106695e8d630baff0f16eee66d": [{"y": 0}], "data-b51c1c018df4c5c9a3b1721f09efcf4f": [{"year": 2016, "slope": -0.4121293317998357, "n_nta": 40}, {"year": 2017, "slope": -0.5718647963659766, "n_nta": 73}, {"year": 2018, "slope": -2.1923097050223253, "n_nta": 90}, {"year": 2019, "slope": -0.7017416217316861, "n_nta": 96}, {"year": 2020, "slope": -1.6806777660512662, "n_nta": 60}, {"year": 2021, "slope": -0.6511242692079396, "n_nta": 131}, {"year": 2022, "slope": -0.14624102588631568, "n_nta": 211}, {"year": 2023, "slope": -0.27317056923748195, "n_nta": 213}, {"year": 2024, "slope": -0.37413526633648975, "n_nta": 219}, {"year": 2025, "slope": -0.44689238905016154, "n_nta": 213}, {"year": 2026, "slope": -0.11330629894101464, "n_nta": 202}]}};
+      var embedOpt = {"mode": "vega-lite"};
+
+      function showError(el, error){
+          el.innerHTML = ('<div style="color:red;">'
+                          + '<p>JavaScript Error: ' + error.message + '</p>'
+                          + "<p>This usually means there's a typo in your chart specification. "
+                          + "See the javascript console for the full traceback.</p>"
+                          + '</div>');
+          throw error;
+      }
+      const el = document.getElementById('vis');
+      vegaEmbed("#vis", spec, embedOpt)
+        .catch(error => showError(el, error));
+    })(vegaEmbed);
+
+  </script>
+</body>
+</html>

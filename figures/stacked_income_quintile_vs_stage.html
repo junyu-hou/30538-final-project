@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    #vis.vega-embed {
+      width: 100%;
+      display: flex;
+    }
+
+    #vis.vega-embed details,
+    #vis.vega-embed details summary {
+      position: relative;
+    }
+  </style>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega@6"></script>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega-lite@6.1.0"></script>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega-embed@7"></script>
+</head>
+<body>
+  <div id="vis"></div>
+  <script>
+    (function(vegaEmbed) {
+      var spec = {"config": {"view": {"continuousWidth": 300, "continuousHeight": 300}}, "data": {"name": "data-4b64bd3dd1adea1e48fed679c35f8258"}, "mark": {"type": "bar"}, "encoding": {"color": {"field": "inspection_stage", "title": "Inspection Stage", "type": "nominal"}, "tooltip": [{"field": "income_quintile", "title": "Income Quintile", "type": "nominal"}, {"field": "inspection_stage", "title": "Stage", "type": "nominal"}, {"field": "n", "format": ",.0f", "title": "Count", "type": "quantitative"}, {"field": "share", "format": ".2%", "title": "Share", "type": "quantitative"}], "x": {"field": "income_quintile", "sort": ["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"], "title": "Income Quintile", "type": "nominal"}, "y": {"axis": {"format": "%"}, "field": "share", "title": "Share of Inspections", "type": "quantitative"}}, "height": 420, "params": [{"name": "param_1e9efca18e7a2868", "select": {"type": "interval", "encodings": ["x", "y"]}, "bind": "scales"}], "title": "Income Quintile vs Inspection Stage (Stacked Share)", "width": 700, "$schema": "https://vega.github.io/schema/vega-lite/v6.1.0.json", "datasets": {"data-4b64bd3dd1adea1e48fed679c35f8258": [{"income_quintile": "Q1 (Lowest)", "inspection_stage": "Compliance Inspection", "n": 827, "share": 0.014246830209481809}, {"income_quintile": "Q1 (Lowest)", "inspection_stage": "Initial Inspection", "n": 40654, "share": 0.7003514332965821}, {"income_quintile": "Q1 (Lowest)", "inspection_stage": "Other", "n": 0, "share": 0.0}, {"income_quintile": "Q1 (Lowest)", "inspection_stage": "Re-inspection", "n": 15647, "share": 0.2695527839029768}, {"income_quintile": "Q1 (Lowest)", "inspection_stage": "Reopening Inspection", "n": 827, "share": 0.014246830209481809}, {"income_quintile": "Q1 (Lowest)", "inspection_stage": "Second Compliance Inspection", "n": 93, "share": 0.001602122381477398}, {"income_quintile": "Q2", "inspection_stage": "Compliance Inspection", "n": 778, "share": 0.013284384871510287}, {"income_quintile": "Q2", "inspection_stage": "Initial Inspection", "n": 41379, "share": 0.7065482796892342}, {"income_quintile": "Q2", "inspection_stage": "Other", "n": 1, "share": 1.7075044821992656e-05}, {"income_quintile": "Q2", "inspection_stage": "Re-inspection", "n": 15551, "share": 0.2655340220268078}, {"income_quintile": "Q2", "inspection_stage": "Reopening Inspection", "n": 801, "share": 0.013677110902416119}, {"income_quintile": "Q2", "inspection_stage": "Second Compliance Inspection", "n": 55, "share": 0.0009391274652095962}, {"income_quintile": "Q3", "inspection_stage": "Compliance Inspection", "n": 675, "share": 0.011718343113086352}, {"income_quintile": "Q3", "inspection_stage": "Initial Inspection", "n": 42013, "share": 0.7293670358668102}, {"income_quintile": "Q3", "inspection_stage": "Other", "n": 0, "share": 0.0}, {"income_quintile": "Q3", "inspection_stage": "Re-inspection", "n": 14155, "share": 0.2457379952084997}, {"income_quintile": "Q3", "inspection_stage": "Reopening Inspection", "n": 693, "share": 0.012030832262768654}, {"income_quintile": "Q3", "inspection_stage": "Second Compliance Inspection", "n": 66, "share": 0.00114579354883511}, {"income_quintile": "Q4", "inspection_stage": "Compliance Inspection", "n": 736, "share": 0.010664966454623176}, {"income_quintile": "Q4", "inspection_stage": "Initial Inspection", "n": 51068, "share": 0.7399979713379027}, {"income_quintile": "Q4", "inspection_stage": "Other", "n": 0, "share": 0.0}, {"income_quintile": "Q4", "inspection_stage": "Re-inspection", "n": 16366, "share": 0.23715059917984088}, {"income_quintile": "Q4", "inspection_stage": "Reopening Inspection", "n": 778, "share": 0.011273565083827215}, {"income_quintile": "Q4", "inspection_stage": "Second Compliance Inspection", "n": 63, "share": 0.0009128979438060599}, {"income_quintile": "Q5 (Highest)", "inspection_stage": "Compliance Inspection", "n": 601, "share": 0.013085984279399917}, {"income_quintile": "Q5 (Highest)", "inspection_stage": "Initial Inspection", "n": 33991, "share": 0.7401093038953122}, {"income_quintile": "Q5 (Highest)", "inspection_stage": "Other", "n": 0, "share": 0.0}, {"income_quintile": "Q5 (Highest)", "inspection_stage": "Re-inspection", "n": 10815, "share": 0.23548239597622314}, {"income_quintile": "Q5 (Highest)", "inspection_stage": "Reopening Inspection", "n": 456, "share": 0.009928800052256843}, {"income_quintile": "Q5 (Highest)", "inspection_stage": "Second Compliance Inspection", "n": 64, "share": 0.0013935157968079778}]}};
+      var embedOpt = {"mode": "vega-lite"};
+
+      function showError(el, error){
+          el.innerHTML = ('<div style="color:red;">'
+                          + '<p>JavaScript Error: ' + error.message + '</p>'
+                          + "<p>This usually means there's a typo in your chart specification. "
+                          + "See the javascript console for the full traceback.</p>"
+                          + '</div>');
+          throw error;
+      }
+      const el = document.getElementById('vis');
+      vegaEmbed("#vis", spec, embedOpt)
+        .catch(error => showError(el, error));
+    })(vegaEmbed);
+
+  </script>
+</body>
+</html>
