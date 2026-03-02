@@ -1,0 +1,930 @@
+---
+title: "Final Project — Static Plots"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import altair as alt
+from __future__ import annotations
+import folium
+from folium.features import GeoJsonTooltip
+from branca.colormap import linear
+from branca.element import MacroElement
+from jinja2 import Template
+from branca.colormap import LinearColormap
+```
+
+
+
+
+```{python}
+# =========================================================
+# 0) Paths & shared utilities  (RELATIVE PATHS ONLY)
+# =========================================================
+
+def ensure_exists(path: Path, what: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"[Missing {what}] Cannot find: {path}")
+
+
+def ensure_cols(df: pd.DataFrame, required: list[str], where: str) -> None:
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"[{where}] Missing required columns: {missing}")
+
+
+def clean_key(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.strip()
+
+
+def to_numeric_inplace(df: pd.DataFrame, cols: list[str]) -> None:
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
+def safe_log_income(df: pd.DataFrame, income_col: str = "median_income_proxy") -> pd.DataFrame:
+    df = df.copy()
+    if income_col not in df.columns:
+        raise ValueError(f"Income column '{income_col}' not found.")
+    df[income_col] = pd.to_numeric(df[income_col], errors="coerce")
+    df = df.dropna(subset=[income_col])
+    df = df[df[income_col] > 0]
+    df["log_income"] = np.log(df[income_col])
+    return df
+
+
+def save_fig(fig: plt.Figure, outdir: Path, filename: str, dpi: int = 200) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / filename
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
+    return out
+
+
+# ---- RELATIVE repo root anchored at code/ ----
+# 你的 qmd 在 code/ 里，所以项目根目录就是上一级
+REPO = Path("..")
+
+# 可选：做一个“相对结构存在性”检查（仍然是相对路径）
+if not (REPO / "data").is_dir() or not (REPO / "code").is_dir():
+    raise FileNotFoundError(
+        "Expected structure: ../data and ../code (run this QMD from code/)."
+    )
+
+RAW_NTA_SHP = REPO / "data" / "raw-data" / "nta_2020" / "nta_2020.shp"
+DERIVED = REPO / "data" / "derived-data"
+OUTDIR = REPO / "figures"
+
+INCOME_CSV = DERIVED / "nta_income_households_2024.csv"
+SUMMARY_CSV = DERIVED / "nta_inspection_summary.csv"
+INSP_PARQUET = DERIVED / "inspections_with_nta_income.parquet"
+
+print("REPO         =", REPO)
+print("RAW_NTA_SHP  =", RAW_NTA_SHP)
+print("INCOME_CSV   =", INCOME_CSV)
+print("SUMMARY_CSV  =", SUMMARY_CSV)
+print("INSP_PARQUET =", INSP_PARQUET)
+print("OUTDIR       =", OUTDIR)
+```
+
+
+
+
+```{python}
+# =========================================================
+# 1) Load NTA geometry
+# =========================================================
+
+ensure_exists(RAW_NTA_SHP, "NTA shapefile")
+nta_gdf = gpd.read_file(RAW_NTA_SHP)
+
+NTA_CODE_COL = "nta2020"
+ensure_cols(nta_gdf, [NTA_CODE_COL], "NTA shapefile")
+
+nta_gdf = nta_gdf.copy()
+nta_gdf["nta"] = clean_key(nta_gdf[NTA_CODE_COL])
+
+nta_gdf = nta_gdf.to_crs(epsg=4326)
+
+nta_gdf.head(2)
+```
+
+
+
+```{python}
+# =========================================================
+# 2) One generic Altair choropleth function
+# =========================================================
+
+def plot_nta_choropleth_altair(
+    gdf: gpd.GeoDataFrame,
+    value_col: str,
+    title: str,
+    legend_title: str,
+    scheme: str = "viridis",
+    tooltip_format: str = ",.2f",
+    output_html: str | None = None,
+    width: int = 700,
+    height: int = 700,
+) -> alt.Chart:
+    if value_col not in gdf.columns:
+        raise ValueError(f"'{value_col}' not in GeoDataFrame columns.")
+
+    geojson = gdf.__geo_interface__
+
+    chart = (
+        alt.Chart(alt.Data(values=geojson["features"]))
+        .mark_geoshape(stroke="white", strokeWidth=0.3)
+        .encode(
+            color=alt.Color(
+                f"properties.{value_col}:Q",
+                title=legend_title,
+                scale=alt.Scale(scheme=scheme),
+            ),
+            tooltip=[
+                alt.Tooltip("properties.nta:N", title="NTA"),
+                alt.Tooltip(
+                    f"properties.{value_col}:Q",
+                    title=legend_title,
+                    format=tooltip_format
+                ),
+            ],
+        )
+        .properties(title=title, width=width, height=height)
+        .project(type="mercator")
+    )
+
+    if output_html is not None:
+        outpath = OUTDIR / output_html
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+        chart.save(str(outpath))
+        print("[Saved]", outpath)
+
+    return chart
+```
+
+
+
+```{python}
+# =========================================================
+# Map 1: NYC NTA Median Household Income
+# =========================================================
+
+# =========================
+# Helpers
+# =========================
+def find_repo_root(start: Path | None = None) -> Path:
+    start = (start or Path.cwd()).resolve()
+    for p in [start] + list(start.parents):
+        if (p / "data").exists() and (p / "code").exists():
+            return p
+    raise FileNotFoundError("Could not find project root (must contain data/ and code/).")
+
+
+def _guess_borough_col(gdf: gpd.GeoDataFrame) -> str | None:
+    candidates = [
+        "boroname", "boro_name", "borough", "boro",
+        "boro_nm", "boro_code", "borocode",
+        "county", "county_name",
+    ]
+    cols_lower = {c.lower(): c for c in gdf.columns}
+    for c in candidates:
+        if c in cols_lower:
+            return cols_lower[c]
+    return None
+
+
+def _make_viridis_colormap(vmin: float, vmax: float):
+    for candidate in ["viridis", "Viridis", "Viridis_09", "viridis_09"]:
+        if hasattr(linear, candidate):
+            return getattr(linear, candidate).scale(vmin, vmax)
+    if hasattr(linear, "YlGnBu_09"):
+        return linear.YlGnBu_09.scale(vmin, vmax)
+    raise AttributeError(
+        "Could not find a usable colormap in branca.colormap.linear. "
+        "Try upgrading branca: pip install -U branca"
+    )
+
+
+def _add_fixed_legend_topright(
+    m: folium.Map,
+    cmap,
+    ticks: list[int],
+    caption: str,
+    box_width: int = 420,
+    pad_y: int = 10,
+    pad_x: int = 16,
+    title_size: int = 14,
+    tick_size: int = 10,
+    bar_height: int = 12,
+    top_offset_px: int = 20,
+    right_offset_px: int = 20,
+    control_pad_right_px: int = 70,
+    control_pad_top_px: int = 0,
+):
+    vmin, vmax = float(min(ticks)), float(max(ticks))
+    sample_vals = np.linspace(vmin, vmax, 12)
+    colors = [cmap(float(x)) for x in sample_vals]
+    gradient = ", ".join(colors)
+
+    tick_pcts = np.linspace(0, 100, len(ticks))
+    tick_html = ""
+    for pct, lab in zip(tick_pcts, ticks):
+        tick_html += f"""
+        <div style="
+            position:absolute;
+            left:{pct}%;
+            transform:translateX(-50%);
+            top:{bar_height+4}px;
+            font-size:{tick_size}px;
+            color:#111;
+            white-space:nowrap;
+        ">{lab:,}</div>
+        """
+
+    template = f"""
+    {{% macro html(this, kwargs) %}}
+    <div style="
+        position: fixed;
+        top: {top_offset_px + control_pad_top_px}px;
+        right: {right_offset_px + control_pad_right_px}px;
+        z-index: 9999;
+
+        background: rgba(255,255,255,0.95);
+        padding: {pad_y}px {pad_x}px;
+        border-radius: 14px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+
+        width: {box_width}px;
+        max-width: calc(100vw - {right_offset_px + control_pad_right_px + 20}px);
+
+        font-family: Arial, sans-serif;
+    ">
+        <div style="
+            font-size:{title_size}px;
+            font-weight:800;
+            margin-bottom:8px;
+            text-align:left;
+        ">{caption}</div>
+
+        <div style="position: relative; height: {bar_height+24}px;">
+            <div style="
+                height: {bar_height}px;
+                border-radius: 8px;
+                border: 1px solid rgba(0,0,0,0.2);
+                background: linear-gradient(to right, {gradient});
+            "></div>
+
+            {tick_html}
+        </div>
+    </div>
+    {{% endmacro %}}
+    """
+
+    macro = MacroElement()
+    macro._template = Template(template)
+    m.get_root().add_child(macro)
+
+
+# =========================
+# Map 1: NYC NTA Median Household Income (Folium)
+# =========================
+def make_nta_income_map_with_fixed_scale(
+    repo_root: Path | None = None,
+    nta_shp_rel: Path = Path("data/raw-data/nta_2020/nta_2020.shp"),
+    income_csv_rel: Path = Path("data/derived-data/nta_income_households_2024.csv"),
+    nta_code_col: str = "nta2020",
+    income_col: str = "median_income_proxy",
+    out_html_rel: Path = Path("figures/map1_income_basemap_fixedscale.html"),
+    tiles: str = "CartoDB positron",
+    zoom_start: int = 10,
+    FIX_MIN: int = 40000,
+    FIX_MAX: int = 200000,
+    TICK_STEP: int = 20000,
+    legend_box_width: int = 420,
+    legend_title_size: int = 14,
+    legend_tick_size: int = 10,
+    legend_bar_height: int = 12,
+    legend_top_offset_px: int = 20,
+    legend_right_offset_px: int = 20,
+) -> folium.Map:
+    repo_root = (repo_root or find_repo_root()).resolve()
+    nta_shp = repo_root / nta_shp_rel
+    income_csv = repo_root / income_csv_rel
+
+    if not nta_shp.exists():
+        raise FileNotFoundError(f"Missing NTA shapefile: {nta_shp}")
+    if not income_csv.exists():
+        raise FileNotFoundError(f"Missing income CSV: {income_csv}")
+
+    # ----- Load -----
+    nta = gpd.read_file(nta_shp)
+    inc = pd.read_csv(income_csv)
+
+    # ----- Clean keys -----
+    if nta_code_col not in nta.columns:
+        raise ValueError(f"'{nta_code_col}' not found in shapefile columns: {list(nta.columns)}")
+    if "nta" not in inc.columns:
+        raise ValueError(f"'nta' not found in income CSV columns: {list(inc.columns)}")
+    if income_col not in inc.columns:
+        raise ValueError(f"'{income_col}' not found in income CSV columns: {list(inc.columns)}")
+
+    nta["nta"] = nta[nta_code_col].astype(str).str.strip()
+    inc["nta"] = inc["nta"].astype(str).str.strip()
+    inc[income_col] = (
+        inc[income_col]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    inc[income_col] = pd.to_numeric(inc[income_col], errors="coerce")
+
+    gdf = nta.merge(inc[["nta", income_col]], on="nta", how="left").copy()
+    gdf = gdf.to_crs(epsg=4326)
+
+    # ----- Center + bounds -----
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center_lat = (miny + maxy) / 2
+    center_lon = (minx + maxx) / 2
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles=tiles,
+        control_scale=True,
+    )
+
+    # ----- Fixed colormap -----
+    vmin, vmax = float(FIX_MIN), float(FIX_MAX)
+    cmap = _make_viridis_colormap(vmin, vmax)
+    ticks = list(range(FIX_MIN, FIX_MAX + 1, TICK_STEP))
+
+    def style_fn(feat):
+        v = feat["properties"].get(income_col, None)
+        if v is None or pd.isna(v):
+            return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
+        vv = float(v)
+        vv = min(max(vv, vmin), vmax)
+        return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.78}
+
+    # ----- NTA layer (tooltip: NTA + income) -----
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        name="NTA income",
+        style_function=style_fn,
+        tooltip=GeoJsonTooltip(
+            fields=["nta", income_col],
+            aliases=["NTA", "Median household income"],
+            localize=True,
+            sticky=False,
+            labels=True,
+        ),
+    ).add_to(m)
+
+    # ----- Borough boundaries + labels -----
+    boro_col = _guess_borough_col(gdf)
+    if boro_col is not None:
+        boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
+
+        folium.GeoJson(
+            data=boro.__geo_interface__,
+            name="Borough boundaries",
+            style_function=lambda _: {
+                "fillOpacity": 0.0,
+                "color": "#111111",
+                "weight": 2.0,
+                "interactive": False,
+            },
+        ).add_to(m)
+
+        boro_centroids = boro.copy()
+        boro_centroids["centroid"] = boro_centroids.geometry.centroid
+        for _, row in boro_centroids.iterrows():
+            name = str(row[boro_col])
+            lat = float(row["centroid"].y)
+            lon = float(row["centroid"].x)
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-size:12px;
+                        font-weight:800;
+                        color:#111;
+                        text-shadow: 0 0 3px rgba(255,255,255,0.95);
+                    ">{name}</div>
+                    """
+                ),
+            ).add_to(m)
+
+    # ----- Legend (TOP-RIGHT, not clipped) -----
+    _add_fixed_legend_topright(
+        m=m,
+        cmap=cmap,
+        ticks=ticks,
+        caption="Median Household Income",
+        box_width=legend_box_width,
+        title_size=legend_title_size,
+        tick_size=legend_tick_size,
+        bar_height=legend_bar_height,
+        top_offset_px=legend_top_offset_px,
+        right_offset_px=legend_right_offset_px,
+        control_pad_right_px=80,
+    )
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    outpath = repo_root / out_html_rel
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(outpath))
+    print("Saved:", outpath)
+    print(f"Fixed scale: [{FIX_MIN:,}, {FIX_MAX:,}] step {TICK_STEP:,}")
+
+    return m
+
+
+# =========================
+# Notebook / QMD usage
+# =========================
+m = make_nta_income_map_with_fixed_scale(
+    out_html_rel=Path("figures/map1_income_basemap_fixedscale.html"),
+    legend_box_width=420,
+    legend_title_size=14,
+    legend_tick_size=10,
+    legend_bar_height=12,
+    legend_top_offset_px=20,
+    legend_right_offset_px=20,
+)
+m
+```
+
+
+
+
+
+
+
+```{python}
+# =========================================================
+# Map 2: NYC NTA Food Safety Risk (Average Inspection Score)
+# =========================================================
+
+# =========================
+# Colormap helper (Reds)
+# =========================
+def _make_reds_colormap(vmin: float, vmax: float):
+    """
+    Score higher = worse (higher risk). Reds: darker = worse.
+    """
+    for candidate in ["Reds_09", "Reds_08", "Reds_07", "Reds_06", "Reds_05", "Reds"]:
+        if hasattr(linear, candidate):
+            return getattr(linear, candidate).scale(vmin, vmax)
+    if hasattr(linear, "YlOrRd_09"):
+        return linear.YlOrRd_09.scale(vmin, vmax)
+    raise AttributeError(
+        "Could not find a usable Reds colormap in branca.colormap.linear. "
+        "Try upgrading branca: pip install -U branca"
+    )
+
+
+def _guess_avg_score_col(df: pd.DataFrame) -> str:
+    """
+    Infer the 'average inspection score' column name from nta_inspection_summary.csv.
+    """
+    cols = list(df.columns)
+    cols_l = [c.lower() for c in cols]
+
+    candidates = [
+        "avg_inspection_score",
+        "avg_score",
+        "mean_score",
+        "average_score",
+        "inspection_score_avg",
+        "inspection_score_mean",
+        "mean_inspection_score",
+        "score_avg",
+        "score_mean",
+    ]
+    for cand in candidates:
+        if cand in cols_l:
+            return cols[cols_l.index(cand)]
+
+    for c, cl in zip(cols, cols_l):
+        if ("score" in cl) and (("avg" in cl) or ("mean" in cl) or ("average" in cl)):
+            return c
+
+    score_like = [c for c, cl in zip(cols, cols_l) if "score" in cl]
+    if len(score_like) == 1:
+        return score_like[0]
+
+    raise ValueError(
+        "[Inspection summary CSV] Could not infer the average score column.\n"
+        f"Available columns: {cols}\n"
+        "Fix: pass score_col='YOUR_COLUMN_NAME' into make_nta_foodrisk_map_with_fixed_scale()."
+    )
+
+
+# =========================
+# Map 2 function (Folium)
+# =========================
+def make_nta_foodrisk_map_with_fixed_scale(
+    # --- RELATIVE PATHS ONLY (from your 0) block) ---
+    nta_shp: Path = RAW_NTA_SHP,
+    score_csv: Path = SUMMARY_CSV,  # ../data/derived-data/nta_inspection_summary.csv
+    out_html: Path = OUTDIR / "map2_food_safety_risk_avgscore_fixedscale.html",
+    # --- columns ---
+    nta_code_col: str = "nta2020",
+    score_col: str | None = None,  # if None, auto-infer from CSV
+    # --- map ---
+    tiles: str = "CartoDB positron",
+    zoom_start: int = 10,
+    # --- fixed scale to match your screenshot ---
+    FIX_MIN: int = 10,
+    FIX_MAX: int = 40,
+    TICK_STEP: int = 10,
+    # --- legend styling ---
+    legend_box_width: int = 420,
+    legend_title_size: int = 14,
+    legend_tick_size: int = 10,
+    legend_bar_height: int = 12,
+    legend_top_offset_px: int = 20,
+    legend_right_offset_px: int = 20,
+) -> folium.Map:
+    # ----- Existence checks (relative paths) -----
+    ensure_exists(nta_shp, "NTA shapefile")
+    ensure_exists(score_csv, "inspection summary CSV")
+
+    # ----- Load -----
+    nta = gpd.read_file(nta_shp)
+    sc = pd.read_csv(score_csv)
+
+    # ----- Validate columns -----
+    ensure_cols(nta, [nta_code_col], "NTA shapefile")
+    ensure_cols(sc, ["nta"], "Inspection summary CSV")
+
+    # choose score column
+    if score_col is None:
+        score_col = _guess_avg_score_col(sc)
+
+    ensure_cols(sc, ["nta", score_col], "Inspection summary CSV (after choosing score_col)")
+
+    # ----- Clean keys & score -----
+    nta = nta.copy()
+    nta["nta"] = clean_key(nta[nta_code_col])
+
+    sc = sc.copy()
+    sc["nta"] = clean_key(sc["nta"])
+    sc[score_col] = (
+        sc[score_col]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    sc[score_col] = pd.to_numeric(sc[score_col], errors="coerce")
+
+    # ----- Merge + CRS -----
+    gdf = nta.merge(sc[["nta", score_col]], on="nta", how="left").copy()
+    gdf = gdf.to_crs(epsg=4326)
+
+    # ----- Center + bounds -----
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center_lat = (miny + maxy) / 2
+    center_lon = (minx + maxx) / 2
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles=tiles,
+        control_scale=True,
+    )
+
+    # ----- Fixed colormap -----
+    vmin, vmax = float(FIX_MIN), float(FIX_MAX)
+    cmap = _make_reds_colormap(vmin, vmax)
+    ticks = list(range(FIX_MIN, FIX_MAX + 1, TICK_STEP))
+
+    def style_fn(feat):
+        v = feat["properties"].get(score_col, None)
+        if v is None or pd.isna(v):
+            return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
+        vv = float(v)
+        vv = min(max(vv, vmin), vmax)  # clamp
+        return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.78}
+
+    # ----- NTA layer (tooltip: NTA + avg score) -----
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        name="NTA risk (avg score)",
+        style_function=style_fn,
+        tooltip=GeoJsonTooltip(
+            fields=["nta", score_col],
+            aliases=["NTA", "Avg score (Higher = Worse)"],
+            localize=True,
+            sticky=False,
+            labels=True,
+        ),
+    ).add_to(m)
+
+    # ----- Borough boundaries + labels (Map1 logic; interactive=False prevents hover stealing) -----
+    boro_col = _guess_borough_col(gdf)
+    if boro_col is not None:
+        boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
+
+        folium.GeoJson(
+            data=boro.__geo_interface__,
+            name="Borough boundaries",
+            style_function=lambda _: {
+                "fillOpacity": 0.0,
+                "color": "#111111",
+                "weight": 2.0,
+                "interactive": False,
+            },
+        ).add_to(m)
+
+        boro_centroids = boro.copy()
+        boro_centroids["centroid"] = boro_centroids.geometry.centroid
+        for _, row in boro_centroids.iterrows():
+            name = str(row[boro_col])
+            lat = float(row["centroid"].y)
+            lon = float(row["centroid"].x)
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-size:12px;
+                        font-weight:800;
+                        color:#111;
+                        text-shadow: 0 0 3px rgba(255,255,255,0.95);
+                    ">{name}</div>
+                    """
+                ),
+            ).add_to(m)
+
+    # ----- Legend (TOP-RIGHT, not clipped) -----
+    _add_fixed_legend_topright(
+        m=m,
+        cmap=cmap,
+        ticks=ticks,
+        caption="Avg Inspection Score (Higher = Worse)",
+        box_width=legend_box_width,
+        title_size=legend_title_size,
+        tick_size=legend_tick_size,
+        bar_height=legend_bar_height,
+        top_offset_px=legend_top_offset_px,
+        right_offset_px=legend_right_offset_px,
+        control_pad_right_px=80,
+    )
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    # ----- Save (relative path) -----
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(out_html))
+    print("Saved:", out_html)
+    print(f"Using score column: {score_col}")
+    print(f"Fixed scale: [{FIX_MIN:,}, {FIX_MAX:,}] step {TICK_STEP:,}")
+
+    return m
+
+
+# =========================
+# Notebook / QMD usage
+# =========================
+m2 = make_nta_foodrisk_map_with_fixed_scale(
+    out_html=OUTDIR / "map2_food_safety_risk_avgscore_fixedscale.html",
+    FIX_MIN=10,
+    FIX_MAX=40,
+    TICK_STEP=10,
+    legend_box_width=420,
+    legend_title_size=14,
+    legend_tick_size=10,
+    legend_bar_height=12,
+    legend_top_offset_px=20,
+    legend_right_offset_px=20,
+)
+m2
+```
+
+
+
+```{python}
+# =========================================================
+# Map 3: NYC Restaurant Inspection Intensity by NTA
+# =========================================================
+
+# =========================
+# Custom colormap (BLUE → GRAY → YELLOW)
+# =========================
+def _make_blue_gray_yellow_colormap(vmin: float, vmax: float):
+    return LinearColormap(
+        colors=[
+            "#0b3c78",  # deep blue (low)
+            "#8e8e8e",  # gray (mid)
+            "#f2d74e",  # yellow (high)
+        ],
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+
+def make_nta_inspection_intensity_map_with_fixed_scale(
+    nta_shp: Path = RAW_NTA_SHP,
+    summary_csv: Path = SUMMARY_CSV,
+    out_html: Path = OUTDIR / "map3_inspection_intensity_fixedscale.html",
+    nta_code_col: str = "nta2020",
+    n_inspections_col: str = "n_inspections",
+    n_unique_restaurants_col: str = "n_unique_restaurants",
+    tiles: str = "CartoDB positron",
+    zoom_start: int = 10,
+    FIX_MIN: float = 2.0,
+    FIX_MAX: float = 14.0,
+    TICK_STEP: float = 2.0,
+    legend_box_width: int = 420,
+    legend_title_size: int = 14,
+    legend_tick_size: int = 10,
+    legend_bar_height: int = 12,
+    legend_top_offset_px: int = 20,
+    legend_right_offset_px: int = 20,
+) -> folium.Map:
+
+    # ----- Existence checks -----
+    ensure_exists(nta_shp, "NTA shapefile")
+    ensure_exists(summary_csv, "inspection summary CSV")
+
+    # ----- Load -----
+    nta = gpd.read_file(nta_shp)
+    summ = pd.read_csv(summary_csv)
+
+    ensure_cols(nta, [nta_code_col], "NTA shapefile")
+    ensure_cols(summ, ["nta", n_inspections_col, n_unique_restaurants_col], "summary CSV")
+
+    # ----- Clean keys -----
+    nta = nta.copy()
+    nta["nta"] = clean_key(nta[nta_code_col])
+
+    summ = summ.copy()
+    summ["nta"] = clean_key(summ["nta"])
+    to_numeric_inplace(summ, [n_inspections_col, n_unique_restaurants_col])
+
+    # ----- Compute intensity -----
+    summ["inspection_intensity"] = summ[n_inspections_col] / summ[n_unique_restaurants_col]
+    summ.loc[summ[n_unique_restaurants_col] == 0, "inspection_intensity"] = np.nan
+    summ["inspection_intensity"] = summ["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
+
+    # ----- Merge + CRS -----
+    gdf = nta.merge(
+        summ[["nta", "inspection_intensity", n_inspections_col, n_unique_restaurants_col]],
+        on="nta",
+        how="left",
+    ).copy()
+    gdf = gdf.to_crs(epsg=4326)
+
+    print(
+        "Share missing intensity after merge:",
+        f"{gdf['inspection_intensity'].isna().mean():.2%}"
+    )
+
+    # ----- Center + bounds -----
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center_lat = (miny + maxy) / 2
+    center_lon = (minx + maxx) / 2
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles=tiles,
+        control_scale=True,
+    )
+
+    # ----- Fixed scale + colormap -----
+    vmin, vmax = float(FIX_MIN), float(FIX_MAX)
+    cmap = _make_blue_gray_yellow_colormap(vmin, vmax)
+    ticks = list(range(int(vmin), int(vmax) + 1, int(TICK_STEP)))
+
+    def style_fn(feat):
+        v = feat["properties"].get("inspection_intensity", None)
+        if v is None or pd.isna(v):
+            return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
+        vv = float(v)
+        vv = min(max(vv, vmin), vmax)
+        return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.82}
+
+    # ----- NTA layer (tooltip includes borough name if present) -----
+    # Note: tooltip字段必须存在于gdf列中；这里用安全方式：只显示我们确定存在的列
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        name="Inspection intensity",
+        style_function=style_fn,
+        tooltip=GeoJsonTooltip(
+            fields=["nta", "inspection_intensity", n_inspections_col, n_unique_restaurants_col],
+            aliases=["NTA", "Inspections / Restaurant", "Total inspections", "Unique restaurants"],
+            localize=True,
+            sticky=False,
+            labels=True,
+        ),
+    ).add_to(m)
+
+    # ----- Borough boundaries + labels (same as Map2, plus text labels) -----
+    boro_col = _guess_borough_col(gdf)
+    if boro_col is not None:
+        boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
+
+        # boundaries: non-interactive so it won't steal hover
+        folium.GeoJson(
+            data=boro.__geo_interface__,
+            name="Borough boundaries",
+            style_function=lambda _: {
+                "fillOpacity": 0.0,
+                "color": "#111111",
+                "weight": 2.0,
+                "interactive": False,
+            },
+        ).add_to(m)
+
+        # labels: place borough name at centroid (note: centroid in EPSG:4326 is fine here)
+        boro_centroids = boro.copy()
+        boro_centroids["centroid"] = boro_centroids.geometry.centroid
+
+        for _, row in boro_centroids.iterrows():
+            name = str(row[boro_col])
+            lat = float(row["centroid"].y)
+            lon = float(row["centroid"].x)
+
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-size:12px;
+                        font-weight:800;
+                        color:#111;
+                        text-shadow: 0 0 3px rgba(255,255,255,0.95);
+                        white-space:nowrap;
+                    ">{name}</div>
+                    """
+                ),
+            ).add_to(m)
+
+    # ----- Legend (TOP-RIGHT, not clipped) -----
+    _add_fixed_legend_topright(
+        m=m,
+        cmap=cmap,
+        ticks=ticks,
+        caption="Inspections / Restaurant",
+        box_width=legend_box_width,
+        title_size=legend_title_size,
+        tick_size=legend_tick_size,
+        bar_height=legend_bar_height,
+        top_offset_px=legend_top_offset_px,
+        right_offset_px=legend_right_offset_px,
+        control_pad_right_px=80,
+    )
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    # ----- Save -----
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(out_html))
+    print("Saved:", out_html)
+    print(f"Fixed scale: [{vmin:g}, {vmax:g}] step {TICK_STEP:g}")
+
+    return m
+
+
+# =========================
+# Run (QMD / Notebook)
+# =========================
+m3 = make_nta_inspection_intensity_map_with_fixed_scale(
+    out_html=OUTDIR / "map3_inspection_intensity_fixedscale.html",
+    FIX_MIN=2,
+    FIX_MAX=14,
+    TICK_STEP=2,
+    legend_box_width=420,
+    legend_title_size=14,
+    legend_tick_size=10,
+    legend_bar_height=12,
+    legend_top_offset_px=20,
+    legend_right_offset_px=20,
+)
+m3
+```
+
+
+
+
