@@ -1,0 +1,1425 @@
+---
+title: "Final Project — Static Plots"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import altair as alt
+from IPython.display import display
+from __future__ import annotations
+import folium
+from folium.features import GeoJsonTooltip
+from branca.colormap import linear
+from branca.element import MacroElement
+from jinja2 import Template
+from branca.colormap import LinearColormap
+```
+
+
+
+```{python}
+# =========================================================
+# 0) Paths & shared utilities  (RELATIVE PATHS ONLY)
+# =========================================================
+
+def ensure_exists(path: Path, what: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"[Missing {what}] Cannot find: {path}")
+
+
+def ensure_cols(df: pd.DataFrame, required: list[str], where: str) -> None:
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"[{where}] Missing required columns: {missing}")
+
+
+def clean_key(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.strip()
+
+
+def to_numeric_inplace(df: pd.DataFrame, cols: list[str]) -> None:
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
+def safe_log_income(df: pd.DataFrame, income_col: str = "median_income_proxy") -> pd.DataFrame:
+    df = df.copy()
+    if income_col not in df.columns:
+        raise ValueError(f"Income column '{income_col}' not found.")
+    df[income_col] = pd.to_numeric(df[income_col], errors="coerce")
+    df = df.dropna(subset=[income_col])
+    df = df[df[income_col] > 0]
+    df["log_income"] = np.log(df[income_col])
+    return df
+
+
+def save_fig(fig: plt.Figure, outdir: Path, filename: str, dpi: int = 200) -> Path:
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / filename
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
+    return out
+
+
+# ---- RELATIVE repo root anchored at code/ ----
+REPO = Path("..")
+
+if not (REPO / "data").is_dir() or not (REPO / "code").is_dir():
+    raise FileNotFoundError(
+        "Expected structure: ../data and ../code (run this QMD from code/)."
+    )
+
+RAW_NTA_SHP = REPO / "data" / "raw-data" / "nta_2020" / "nta_2020.shp"
+DERIVED = REPO / "data" / "derived-data"
+OUTDIR = REPO / "figures"
+
+INCOME_CSV = DERIVED / "nta_income_households_2024.csv"
+SUMMARY_CSV = DERIVED / "nta_inspection_summary.csv"
+INSP_PARQUET = DERIVED / "inspections_with_nta_income.parquet"
+
+print("REPO         =", REPO)
+print("RAW_NTA_SHP  =", RAW_NTA_SHP)
+print("INCOME_CSV   =", INCOME_CSV)
+print("SUMMARY_CSV  =", SUMMARY_CSV)
+print("INSP_PARQUET =", INSP_PARQUET)
+print("OUTDIR       =", OUTDIR)
+```
+
+
+
+```{python}
+# =========================================================
+# 1) Load NTA geometry
+# =========================================================
+
+ensure_exists(RAW_NTA_SHP, "NTA shapefile")
+nta_gdf = gpd.read_file(RAW_NTA_SHP)
+
+NTA_CODE_COL = "nta2020"
+ensure_cols(nta_gdf, [NTA_CODE_COL], "NTA shapefile")
+
+nta_gdf = nta_gdf.copy()
+nta_gdf["nta"] = clean_key(nta_gdf[NTA_CODE_COL])
+
+nta_gdf = nta_gdf.to_crs(epsg=4326)
+
+nta_gdf.head(2)
+```
+
+
+
+```{python}
+# =========================================================
+# 2) One generic Altair choropleth function
+# =========================================================
+
+def plot_nta_choropleth_altair(
+    gdf: gpd.GeoDataFrame,
+    value_col: str,
+    title: str,
+    legend_title: str,
+    scheme: str = "viridis",
+    tooltip_format: str = ",.2f",
+    output_html: str | None = None,
+    width: int = 700,
+    height: int = 700,
+) -> alt.Chart:
+    if value_col not in gdf.columns:
+        raise ValueError(f"'{value_col}' not in GeoDataFrame columns.")
+
+    geojson = gdf.__geo_interface__
+
+    chart = (
+        alt.Chart(alt.Data(values=geojson["features"]))
+        .mark_geoshape(stroke="white", strokeWidth=0.3)
+        .encode(
+            color=alt.Color(
+                f"properties.{value_col}:Q",
+                title=legend_title,
+                scale=alt.Scale(scheme=scheme),
+            ),
+            tooltip=[
+                alt.Tooltip("properties.nta:N", title="NTA"),
+                alt.Tooltip(
+                    f"properties.{value_col}:Q",
+                    title=legend_title,
+                    format=tooltip_format
+                ),
+            ],
+        )
+        .properties(title=title, width=width, height=height)
+        .project(type="mercator")
+    )
+
+    if output_html is not None:
+        outpath = OUTDIR / output_html
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+        chart.save(str(outpath))
+        print("[Saved]", outpath)
+
+    return chart
+```
+
+
+
+```{python}
+# =========================================================
+# Map 1: NYC NTA Median Household Income
+# =========================================================
+
+# =========
+# Helpers
+# =========
+def find_repo_root(start: Path | None = None) -> Path:
+    start = (start or Path.cwd()).resolve()
+    for p in [start] + list(start.parents):
+        if (p / "data").exists() and (p / "code").exists():
+            return p
+    raise FileNotFoundError("Could not find project root (must contain data/ and code/).")
+
+
+def _guess_borough_col(gdf: gpd.GeoDataFrame) -> str | None:
+    candidates = [
+        "boroname", "boro_name", "borough", "boro",
+        "boro_nm", "boro_code", "borocode",
+        "county", "county_name",
+    ]
+    cols_lower = {c.lower(): c for c in gdf.columns}
+    for c in candidates:
+        if c in cols_lower:
+            return cols_lower[c]
+    return None
+
+
+def _make_viridis_colormap(vmin: float, vmax: float):
+    for candidate in ["viridis", "Viridis", "Viridis_09", "viridis_09"]:
+        if hasattr(linear, candidate):
+            return getattr(linear, candidate).scale(vmin, vmax)
+    if hasattr(linear, "YlGnBu_09"):
+        return linear.YlGnBu_09.scale(vmin, vmax)
+    raise AttributeError(
+        "Could not find a usable colormap in branca.colormap.linear. "
+        "Try upgrading branca: pip install -U branca"
+    )
+
+
+def _add_fixed_legend_topright(
+    m: folium.Map,
+    cmap,
+    ticks: list[int],
+    caption: str,
+    box_width: int = 420,
+    pad_y: int = 10,
+    pad_x: int = 16,
+    title_size: int = 14,
+    tick_size: int = 10,
+    bar_height: int = 12,
+    top_offset_px: int = 20,
+    right_offset_px: int = 20,
+    control_pad_right_px: int = 70,
+    control_pad_top_px: int = 0,
+):
+    vmin, vmax = float(min(ticks)), float(max(ticks))
+    sample_vals = np.linspace(vmin, vmax, 12)
+    colors = [cmap(float(x)) for x in sample_vals]
+    gradient = ", ".join(colors)
+
+    tick_pcts = np.linspace(0, 100, len(ticks))
+    tick_html = ""
+    for pct, lab in zip(tick_pcts, ticks):
+        tick_html += f"""
+        <div style="
+            position:absolute;
+            left:{pct}%;
+            transform:translateX(-50%);
+            top:{bar_height+4}px;
+            font-size:{tick_size}px;
+            color:#111;
+            white-space:nowrap;
+        ">{lab:,}</div>
+        """
+
+    template = f"""
+    {{% macro html(this, kwargs) %}}
+    <div style="
+        position: fixed;
+        top: {top_offset_px + control_pad_top_px}px;
+        right: {right_offset_px + control_pad_right_px}px;
+        z-index: 9999;
+
+        background: rgba(255,255,255,0.95);
+        padding: {pad_y}px {pad_x}px;
+        border-radius: 14px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+
+        width: {box_width}px;
+        max-width: calc(100vw - {right_offset_px + control_pad_right_px + 20}px);
+
+        font-family: Arial, sans-serif;
+    ">
+        <div style="
+            font-size:{title_size}px;
+            font-weight:800;
+            margin-bottom:8px;
+            text-align:left;
+        ">{caption}</div>
+
+        <div style="position: relative; height: {bar_height+24}px;">
+            <div style="
+                height: {bar_height}px;
+                border-radius: 8px;
+                border: 1px solid rgba(0,0,0,0.2);
+                background: linear-gradient(to right, {gradient});
+            "></div>
+
+            {tick_html}
+        </div>
+    </div>
+    {{% endmacro %}}
+    """
+
+    macro = MacroElement()
+    macro._template = Template(template)
+    m.get_root().add_child(macro)
+
+
+# =======================================
+# Map 1: NYC NTA Median Household Income
+# =======================================
+def make_nta_income_map_with_fixed_scale(
+    repo_root: Path | None = None,
+    nta_shp_rel: Path = Path("data/raw-data/nta_2020/nta_2020.shp"),
+    income_csv_rel: Path = Path("data/derived-data/nta_income_households_2024.csv"),
+    nta_code_col: str = "nta2020",
+    income_col: str = "median_income_proxy",
+    out_html_rel: Path = Path("figures/map1_income_basemap_fixedscale.html"),
+    tiles: str = "CartoDB positron",
+    zoom_start: int = 10,
+    FIX_MIN: int = 40000,
+    FIX_MAX: int = 200000,
+    TICK_STEP: int = 20000,
+    legend_box_width: int = 420,
+    legend_title_size: int = 14,
+    legend_tick_size: int = 10,
+    legend_bar_height: int = 12,
+    legend_top_offset_px: int = 20,
+    legend_right_offset_px: int = 20,
+) -> folium.Map:
+    repo_root = (repo_root or find_repo_root()).resolve()
+    nta_shp = repo_root / nta_shp_rel
+    income_csv = repo_root / income_csv_rel
+
+    if not nta_shp.exists():
+        raise FileNotFoundError(f"Missing NTA shapefile: {nta_shp}")
+    if not income_csv.exists():
+        raise FileNotFoundError(f"Missing income CSV: {income_csv}")
+
+    # ----- Load -----
+    nta = gpd.read_file(nta_shp)
+    inc = pd.read_csv(income_csv)
+
+    # ----- Clean keys -----
+    if nta_code_col not in nta.columns:
+        raise ValueError(f"'{nta_code_col}' not found in shapefile columns: {list(nta.columns)}")
+    if "nta" not in inc.columns:
+        raise ValueError(f"'nta' not found in income CSV columns: {list(inc.columns)}")
+    if income_col not in inc.columns:
+        raise ValueError(f"'{income_col}' not found in income CSV columns: {list(inc.columns)}")
+
+    nta["nta"] = nta[nta_code_col].astype(str).str.strip()
+    inc["nta"] = inc["nta"].astype(str).str.strip()
+    inc[income_col] = (
+        inc[income_col]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    inc[income_col] = pd.to_numeric(inc[income_col], errors="coerce")
+
+    gdf = nta.merge(inc[["nta", income_col]], on="nta", how="left").copy()
+    gdf = gdf.to_crs(epsg=4326)
+
+    # ----- Center + bounds -----
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center_lat = (miny + maxy) / 2
+    center_lon = (minx + maxx) / 2
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles=tiles,
+        control_scale=True,
+    )
+
+    # ----- Fixed colormap -----
+    vmin, vmax = float(FIX_MIN), float(FIX_MAX)
+    cmap = _make_viridis_colormap(vmin, vmax)
+    ticks = list(range(FIX_MIN, FIX_MAX + 1, TICK_STEP))
+
+    def style_fn(feat):
+        v = feat["properties"].get(income_col, None)
+        if v is None or pd.isna(v):
+            return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
+        vv = float(v)
+        vv = min(max(vv, vmin), vmax)
+        return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.78}
+
+    # ----- NTA layer (tooltip: NTA + income) -----
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        name="NTA income",
+        style_function=style_fn,
+        tooltip=GeoJsonTooltip(
+            fields=["nta", income_col],
+            aliases=["NTA", "Median Household Income"],
+            localize=True,
+            sticky=False,
+            labels=True,
+        ),
+    ).add_to(m)
+
+    # ----- Borough boundaries + labels -----
+    boro_col = _guess_borough_col(gdf)
+    if boro_col is not None:
+        boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
+
+        folium.GeoJson(
+            data=boro.__geo_interface__,
+            name="Borough boundaries",
+            style_function=lambda _: {
+                "fillOpacity": 0.0,
+                "color": "#111111",
+                "weight": 2.0,
+                "interactive": False,
+            },
+        ).add_to(m)
+
+        boro_centroids = boro.copy()
+        boro_centroids["centroid"] = boro_centroids.geometry.centroid
+        for _, row in boro_centroids.iterrows():
+            name = str(row[boro_col])
+            lat = float(row["centroid"].y)
+            lon = float(row["centroid"].x)
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-size:12px;
+                        font-weight:800;
+                        color:#111;
+                        text-shadow: 0 0 3px rgba(255,255,255,0.95);
+                    ">{name}</div>
+                    """
+                ),
+            ).add_to(m)
+
+    # ----- Legend (TOP-RIGHT, not clipped) -----
+    _add_fixed_legend_topright(
+        m=m,
+        cmap=cmap,
+        ticks=ticks,
+        caption="Median Household Income",
+        box_width=legend_box_width,
+        title_size=legend_title_size,
+        tick_size=legend_tick_size,
+        bar_height=legend_bar_height,
+        top_offset_px=legend_top_offset_px,
+        right_offset_px=legend_right_offset_px,
+        control_pad_right_px=80,
+    )
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    outpath = repo_root / out_html_rel
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(outpath))
+    print("Saved:", outpath)
+    print(f"Fixed scale: [{FIX_MIN:,}, {FIX_MAX:,}] step {TICK_STEP:,}")
+
+    return m
+
+
+# =========================
+# Notebook / QMD usage
+# =========================
+m = make_nta_income_map_with_fixed_scale(
+    out_html_rel=Path("figures/map1_income_basemap_fixedscale.html"),
+    legend_box_width=420,
+    legend_title_size=14,
+    legend_tick_size=10,
+    legend_bar_height=12,
+    legend_top_offset_px=20,
+    legend_right_offset_px=20,
+)
+m
+```
+
+
+
+```{python}
+# =========================================================
+# Map 2: NYC NTA Average Inspection Score
+# =========================================================
+
+# ===================
+# Colormap helper
+# ===================
+def _make_reds_colormap(vmin: float, vmax: float):
+    """
+    Score higher = worse (higher risk). Reds: darker = worse.
+    """
+    for candidate in ["Reds_09", "Reds_08", "Reds_07", "Reds_06", "Reds_05", "Reds"]:
+        if hasattr(linear, candidate):
+            return getattr(linear, candidate).scale(vmin, vmax)
+    if hasattr(linear, "YlOrRd_09"):
+        return linear.YlOrRd_09.scale(vmin, vmax)
+    raise AttributeError(
+        "Could not find a usable Reds colormap in branca.colormap.linear. "
+        "Try upgrading branca: pip install -U branca"
+    )
+
+
+def _guess_avg_score_col(df: pd.DataFrame) -> str:
+    """
+    Infer the 'average inspection score' column name from nta_inspection_summary.csv.
+    """
+    cols = list(df.columns)
+    cols_l = [c.lower() for c in cols]
+
+    candidates = [
+        "avg_inspection_score",
+        "avg_score",
+        "mean_score",
+        "average_score",
+        "inspection_score_avg",
+        "inspection_score_mean",
+        "mean_inspection_score",
+        "score_avg",
+        "score_mean",
+    ]
+    for cand in candidates:
+        if cand in cols_l:
+            return cols[cols_l.index(cand)]
+
+    for c, cl in zip(cols, cols_l):
+        if ("score" in cl) and (("avg" in cl) or ("mean" in cl) or ("average" in cl)):
+            return c
+
+    score_like = [c for c, cl in zip(cols, cols_l) if "score" in cl]
+    if len(score_like) == 1:
+        return score_like[0]
+
+    raise ValueError(
+        "[Inspection summary CSV] Could not infer the average score column.\n"
+        f"Available columns: {cols}\n"
+        "Fix: pass score_col='YOUR_COLUMN_NAME' into make_nta_foodrisk_map_with_fixed_scale()."
+    )
+
+
+# =================
+# Map 2 function
+# =================
+def make_nta_foodrisk_map_with_fixed_scale(
+    # --- RELATIVE PATHS ONLY (from your 0) block) ---
+    nta_shp: Path = RAW_NTA_SHP,
+    score_csv: Path = SUMMARY_CSV,  # ../data/derived-data/nta_inspection_summary.csv
+    out_html: Path = OUTDIR / "map2_food_safety_risk_avgscore_fixedscale.html",
+    # --- columns ---
+    nta_code_col: str = "nta2020",
+    score_col: str | None = None,  # if None, auto-infer from CSV
+    # --- map ---
+    tiles: str = "CartoDB positron",
+    zoom_start: int = 10,
+    # --- fixed scale to match your screenshot ---
+    FIX_MIN: int = 10,
+    FIX_MAX: int = 40,
+    TICK_STEP: int = 10,
+    # --- legend styling ---
+    legend_box_width: int = 420,
+    legend_title_size: int = 14,
+    legend_tick_size: int = 10,
+    legend_bar_height: int = 12,
+    legend_top_offset_px: int = 20,
+    legend_right_offset_px: int = 20,
+) -> folium.Map:
+    # ----- Existence checks (relative paths) -----
+    ensure_exists(nta_shp, "NTA shapefile")
+    ensure_exists(score_csv, "inspection summary CSV")
+
+    # ----- Load -----
+    nta = gpd.read_file(nta_shp)
+    sc = pd.read_csv(score_csv)
+
+    # ----- Validate columns -----
+    ensure_cols(nta, [nta_code_col], "NTA shapefile")
+    ensure_cols(sc, ["nta"], "Inspection summary CSV")
+
+    # choose score column
+    if score_col is None:
+        score_col = _guess_avg_score_col(sc)
+
+    ensure_cols(sc, ["nta", score_col], "Inspection summary CSV (after choosing score_col)")
+
+    # ----- Clean keys & score -----
+    nta = nta.copy()
+    nta["nta"] = clean_key(nta[nta_code_col])
+
+    sc = sc.copy()
+    sc["nta"] = clean_key(sc["nta"])
+    sc[score_col] = (
+        sc[score_col]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    sc[score_col] = pd.to_numeric(sc[score_col], errors="coerce")
+
+    # ----- Merge + CRS -----
+    gdf = nta.merge(sc[["nta", score_col]], on="nta", how="left").copy()
+    gdf = gdf.to_crs(epsg=4326)
+
+    # ----- Center + bounds -----
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center_lat = (miny + maxy) / 2
+    center_lon = (minx + maxx) / 2
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles=tiles,
+        control_scale=True,
+    )
+
+    # ----- Fixed colormap -----
+    vmin, vmax = float(FIX_MIN), float(FIX_MAX)
+    cmap = _make_reds_colormap(vmin, vmax)
+    ticks = list(range(FIX_MIN, FIX_MAX + 1, TICK_STEP))
+
+    def style_fn(feat):
+        v = feat["properties"].get(score_col, None)
+        if v is None or pd.isna(v):
+            return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
+        vv = float(v)
+        vv = min(max(vv, vmin), vmax)  # clamp
+        return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.78}
+
+    # ----- NTA layer (tooltip: NTA + avg score) -----
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        name="NTA risk (avg score)",
+        style_function=style_fn,
+        tooltip=GeoJsonTooltip(
+            fields=["nta", score_col],
+            aliases=["NTA", "Avg Score (Higher = Worse)"],
+            localize=True,
+            sticky=False,
+            labels=True,
+        ),
+    ).add_to(m)
+
+    # ----- Borough boundaries + labels (Map1 logic; interactive=False prevents hover stealing) -----
+    boro_col = _guess_borough_col(gdf)
+    if boro_col is not None:
+        boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
+
+        folium.GeoJson(
+            data=boro.__geo_interface__,
+            name="Borough boundaries",
+            style_function=lambda _: {
+                "fillOpacity": 0.0,
+                "color": "#111111",
+                "weight": 2.0,
+                "interactive": False,
+            },
+        ).add_to(m)
+
+        boro_centroids = boro.copy()
+        boro_centroids["centroid"] = boro_centroids.geometry.centroid
+        for _, row in boro_centroids.iterrows():
+            name = str(row[boro_col])
+            lat = float(row["centroid"].y)
+            lon = float(row["centroid"].x)
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-size:12px;
+                        font-weight:800;
+                        color:#111;
+                        text-shadow: 0 0 3px rgba(255,255,255,0.95);
+                    ">{name}</div>
+                    """
+                ),
+            ).add_to(m)
+
+    # ----- Legend (TOP-RIGHT, not clipped) -----
+    _add_fixed_legend_topright(
+        m=m,
+        cmap=cmap,
+        ticks=ticks,
+        caption="Avg Inspection Score (Higher = Worse)",
+        box_width=legend_box_width,
+        title_size=legend_title_size,
+        tick_size=legend_tick_size,
+        bar_height=legend_bar_height,
+        top_offset_px=legend_top_offset_px,
+        right_offset_px=legend_right_offset_px,
+        control_pad_right_px=80,
+    )
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    # ----- Save (relative path) -----
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(out_html))
+    print("Saved:", out_html)
+    print(f"Using score column: {score_col}")
+    print(f"Fixed scale: [{FIX_MIN:,}, {FIX_MAX:,}] step {TICK_STEP:,}")
+
+    return m
+
+
+# =========================
+# Notebook / QMD usage
+# =========================
+m2 = make_nta_foodrisk_map_with_fixed_scale(
+    out_html=OUTDIR / "map2_food_safety_risk_avgscore_fixedscale.html",
+    FIX_MIN=10,
+    FIX_MAX=40,
+    TICK_STEP=10,
+    legend_box_width=420,
+    legend_title_size=14,
+    legend_tick_size=10,
+    legend_bar_height=12,
+    legend_top_offset_px=20,
+    legend_right_offset_px=20,
+)
+m2
+```
+
+
+
+```{python}
+# ==================================================
+# Map 3: NYC NTA Restaurant Inspection Intensity
+# ==================================================
+
+# ================
+# Custom colormap
+# ================
+def _make_blue_gray_yellow_colormap(vmin: float, vmax: float):
+    return LinearColormap(
+        colors=[
+            "#0b3c78",  # deep blue (low)
+            "#8e8e8e",  # gray (mid)
+            "#f2d74e",  # yellow (high)
+        ],
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+
+def make_nta_inspection_intensity_map_with_fixed_scale(
+    nta_shp: Path = RAW_NTA_SHP,
+    summary_csv: Path = SUMMARY_CSV,
+    out_html: Path = OUTDIR / "map3_inspection_intensity_fixedscale.html",
+    nta_code_col: str = "nta2020",
+    n_inspections_col: str = "n_inspections",
+    n_unique_restaurants_col: str = "n_unique_restaurants",
+    tiles: str = "CartoDB positron",
+    zoom_start: int = 10,
+    FIX_MIN: float = 2.0,
+    FIX_MAX: float = 14.0,
+    TICK_STEP: float = 2.0,
+    legend_box_width: int = 420,
+    legend_title_size: int = 14,
+    legend_tick_size: int = 10,
+    legend_bar_height: int = 12,
+    legend_top_offset_px: int = 20,
+    legend_right_offset_px: int = 20,
+) -> folium.Map:
+
+    # ----- Existence checks -----
+    ensure_exists(nta_shp, "NTA shapefile")
+    ensure_exists(summary_csv, "inspection summary CSV")
+
+    # ----- Load -----
+    nta = gpd.read_file(nta_shp)
+    summ = pd.read_csv(summary_csv)
+
+    ensure_cols(nta, [nta_code_col], "NTA shapefile")
+    ensure_cols(summ, ["nta", n_inspections_col, n_unique_restaurants_col], "summary CSV")
+
+    # ----- Clean keys -----
+    nta = nta.copy()
+    nta["nta"] = clean_key(nta[nta_code_col])
+
+    summ = summ.copy()
+    summ["nta"] = clean_key(summ["nta"])
+    to_numeric_inplace(summ, [n_inspections_col, n_unique_restaurants_col])
+
+    # ----- Compute intensity -----
+    summ["inspection_intensity"] = summ[n_inspections_col] / summ[n_unique_restaurants_col]
+    summ.loc[summ[n_unique_restaurants_col] == 0, "inspection_intensity"] = np.nan
+    summ["inspection_intensity"] = summ["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
+
+    # ----- Merge + CRS -----
+    gdf = nta.merge(
+        summ[["nta", "inspection_intensity", n_inspections_col, n_unique_restaurants_col]],
+        on="nta",
+        how="left",
+    ).copy()
+    gdf = gdf.to_crs(epsg=4326)
+
+    print(
+        "Share missing intensity after merge:",
+        f"{gdf['inspection_intensity'].isna().mean():.2%}"
+    )
+
+    # ----- Center + bounds -----
+    minx, miny, maxx, maxy = gdf.total_bounds
+    center_lat = (miny + maxy) / 2
+    center_lon = (minx + maxx) / 2
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles=tiles,
+        control_scale=True,
+    )
+
+    # ----- Fixed scale + colormap -----
+    vmin, vmax = float(FIX_MIN), float(FIX_MAX)
+    cmap = _make_blue_gray_yellow_colormap(vmin, vmax)
+    ticks = list(range(int(vmin), int(vmax) + 1, int(TICK_STEP)))
+
+    def style_fn(feat):
+        v = feat["properties"].get("inspection_intensity", None)
+        if v is None or pd.isna(v):
+            return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
+        vv = float(v)
+        vv = min(max(vv, vmin), vmax)
+        return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.82}
+
+    # ----- NTA layer (tooltip includes borough name if present) -----
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        name="Inspection intensity",
+        style_function=style_fn,
+        tooltip=GeoJsonTooltip(
+            fields=["nta", "inspection_intensity", n_inspections_col, n_unique_restaurants_col],
+            aliases=["NTA", "Inspection Intensity", "Total Inspections", "Unique Restaurants"],
+            localize=True,
+            sticky=False,
+            labels=True,
+        ),
+    ).add_to(m)
+
+    # ----- Borough boundaries + labels (same as Map2, plus text labels) -----
+    boro_col = _guess_borough_col(gdf)
+    if boro_col is not None:
+        boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
+
+        # boundaries: non-interactive so it won't steal hover
+        folium.GeoJson(
+            data=boro.__geo_interface__,
+            name="Borough boundaries",
+            style_function=lambda _: {
+                "fillOpacity": 0.0,
+                "color": "#111111",
+                "weight": 2.0,
+                "interactive": False,
+            },
+        ).add_to(m)
+
+        # labels: place borough name at centroid (note: centroid in EPSG:4326 is fine here)
+        boro_centroids = boro.copy()
+        boro_centroids["centroid"] = boro_centroids.geometry.centroid
+
+        for _, row in boro_centroids.iterrows():
+            name = str(row[boro_col])
+            lat = float(row["centroid"].y)
+            lon = float(row["centroid"].x)
+
+            folium.Marker(
+                location=[lat, lon],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        font-size:12px;
+                        font-weight:800;
+                        color:#111;
+                        text-shadow: 0 0 3px rgba(255,255,255,0.95);
+                        white-space:nowrap;
+                    ">{name}</div>
+                    """
+                ),
+            ).add_to(m)
+
+    # ----- Legend -----
+    _add_fixed_legend_topright(
+        m=m,
+        cmap=cmap,
+        ticks=ticks,
+        caption="Inspections / Restaurant",
+        box_width=legend_box_width,
+        title_size=legend_title_size,
+        tick_size=legend_tick_size,
+        bar_height=legend_bar_height,
+        top_offset_px=legend_top_offset_px,
+        right_offset_px=legend_right_offset_px,
+        control_pad_right_px=80,
+    )
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+    # ----- Save -----
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(out_html))
+    print("Saved:", out_html)
+    print(f"Fixed scale: [{vmin:g}, {vmax:g}] step {TICK_STEP:g}")
+
+    return m
+
+
+# =========================
+# Run (QMD / Notebook)
+# =========================
+m3 = make_nta_inspection_intensity_map_with_fixed_scale(
+    out_html=OUTDIR / "map3_inspection_intensity_fixedscale.html",
+    FIX_MIN=2,
+    FIX_MAX=14,
+    TICK_STEP=2,
+    legend_box_width=420,
+    legend_title_size=14,
+    legend_tick_size=10,
+    legend_bar_height=12,
+    legend_top_offset_px=20,
+    legend_right_offset_px=20,
+)
+m3
+```
+
+
+
+```{python}
+# =============================================
+# 4) Scatter Plots
+# =============================================
+
+def save_chart_html(chart: alt.Chart, outdir: Path, filename: str) -> Path:
+    """Save Altair chart as HTML (always). Return saved path."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / filename
+    chart.save(str(outpath))
+    print("[Saved]", outpath)
+    return outpath
+
+def _compute_slope(dd: pd.DataFrame, x: str, y: str) -> float:
+    """OLS slope of y ~ x (with intercept)."""
+    X = dd[x].to_numpy(dtype=float)
+    Y = dd[y].to_numpy(dtype=float)
+    slope = np.polyfit(X, Y, 1)[0]
+    return float(slope)
+
+def _beauty_config(chart: alt.Chart) -> alt.Chart:
+    """统一美化风格（更清晰更干净）"""
+    return (
+        chart
+        .configure_view(stroke=None)
+        .configure_title(fontSize=18, font="Arial", anchor="middle", offset=10)
+        .configure_axis(
+            labelFont="Arial",
+            titleFont="Arial",
+            labelFontSize=12,
+            titleFontSize=13,
+            grid=True,
+            gridOpacity=0.25,
+            tickSize=5,
+        )
+    )
+
+def _boxed_annotation(
+    slope: float,
+    width: int,
+    height: int,
+    pad_right: int = 6,
+    pad_bottom: int = 6,
+    box_h: int = 20,
+    font_size: int = 11,
+    pad_lr: int = 6,
+    est_char_px: int = 6,
+) -> alt.LayerChart:
+    label = f"β̂ = {slope:.3f}"
+
+    # tighter width estimate
+    box_w = pad_lr * 2 + est_char_px * len(label)
+
+    box_x = width - pad_right
+    box_y = height - pad_bottom
+    box_left = box_x - box_w
+    box_top = box_y - box_h
+
+    df_label = pd.DataFrame({"label": [label]})
+
+    box = (
+        alt.Chart(df_label)
+        .mark_rect(
+            cornerRadius=6,
+            fill="white",
+            stroke="#888888",
+            strokeWidth=1,
+            opacity=0.95,
+        )
+        .encode(
+            x=alt.value(box_left),
+            x2=alt.value(box_x),
+            y=alt.value(box_top),
+            y2=alt.value(box_y),
+        )
+    )
+
+    text = (
+        alt.Chart(df_label)
+        .mark_text(
+            align="right",
+            baseline="middle",
+            font="Arial",
+            fontSize=font_size,
+            fontWeight="bold",
+        )
+        .encode(
+            x=alt.value(box_x - pad_lr),
+            y=alt.value((box_top + box_y) / 2),
+            text="label:N",
+        )
+    )
+
+    return box + text
+
+def scatter_with_fit_altair(
+    d: pd.DataFrame,
+    x: str,
+    y: str,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    out_html: str,
+    x_domain: tuple[float, float] | None = (10, 13),
+    x_ticks: list[float] | None = [10, 11, 12, 13],
+    width: int = 720,
+    height: int = 440,
+) -> alt.Chart:
+    """
+    Scatter + OLS regression line (red) + boxed β̂ at bottom-right.
+    Optional forced x-axis domain/ticks.
+    Save as HTML and return chart (for Quarto display).
+    """
+    if x not in d.columns or y not in d.columns:
+        raise ValueError(f"scatter_with_fit_altair needs columns: {x}, {y}")
+
+    dd = d[[x, y]].copy()
+    dd[x] = pd.to_numeric(dd[x], errors="coerce")
+    dd[y] = pd.to_numeric(dd[y], errors="coerce")
+    dd = dd[np.isfinite(dd[x]) & np.isfinite(dd[y])].copy()
+    if len(dd) < 2:
+        raise ValueError(f"Not enough valid rows to plot: {title}")
+
+    slope = _compute_slope(dd, x, y)
+
+    # x axis controls
+    x_scale = alt.Scale() if x_domain is None else alt.Scale(domain=list(x_domain))
+    x_axis = alt.Axis()
+    if x_ticks is not None:
+        x_axis = alt.Axis(values=x_ticks, format=".0f")
+
+    base = alt.Chart(dd).properties(title=title, width=width, height=height)
+
+    points = base.mark_circle(size=70, opacity=0.55).encode(
+        x=alt.X(f"{x}:Q", title=xlabel, scale=x_scale, axis=x_axis),
+        y=alt.Y(f"{y}:Q", title=ylabel),
+        tooltip=[
+            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.3f"),
+            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.3f"),
+        ],
+    )
+
+    # regression line in red
+    line = (
+        base
+        .transform_regression(x, y)
+        .mark_line(color="red", strokeWidth=3)
+        .encode(
+            x=alt.X(f"{x}:Q", scale=x_scale, axis=x_axis),
+            y=alt.Y(f"{y}:Q"),
+        )
+    )
+
+    annotation = _boxed_annotation(slope, width=width, height=height)
+
+    chart = _beauty_config((points + line + annotation).interactive())
+    save_chart_html(chart, OUTDIR, out_html)
+    return chart
+
+def scatter_with_fit_altair_simple(
+    d: pd.DataFrame,
+    x: str,
+    y: str,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    out_html: str,
+    width: int = 720,
+    height: int = 440,
+) -> alt.Chart:
+    if x not in d.columns or y not in d.columns:
+        raise ValueError(f"scatter_with_fit_altair_simple needs columns: {x}, {y}")
+
+    dd = d[[x, y]].copy()
+    dd[x] = pd.to_numeric(dd[x], errors="coerce")
+    dd[y] = pd.to_numeric(dd[y], errors="coerce")
+    dd = dd[np.isfinite(dd[x]) & np.isfinite(dd[y])].copy()
+    if len(dd) < 2:
+        raise ValueError(f"Not enough valid rows to plot: {title}")
+
+    slope = _compute_slope(dd, x, y)
+
+    base = alt.Chart(dd).properties(title=title, width=width, height=height)
+
+    points = base.mark_circle(size=70, opacity=0.55).encode(
+        x=alt.X(f"{x}:Q", title=xlabel),
+        y=alt.Y(f"{y}:Q", title=ylabel),
+        tooltip=[
+            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.3f"),
+            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.3f"),
+        ],
+    )
+
+    line = (
+        base
+        .transform_regression(x, y)
+        .mark_line(color="red", strokeWidth=3)
+        .encode(
+            x=alt.X(f"{x}:Q"),
+            y=alt.Y(f"{y}:Q"),
+        )
+    )
+
+    annotation = _boxed_annotation(slope, width=width, height=height)
+
+    chart = _beauty_config((points + line + annotation).interactive())
+    save_chart_html(chart, OUTDIR, out_html)
+    return chart
+
+# ------------------- Load data & build charts -------------------
+df = pd.read_csv(SUMMARY_CSV).copy()
+ensure_cols(
+    df,
+    ["nta", "median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"],
+    "summary CSV (static plots)",
+)
+df["nta"] = clean_key(df["nta"])
+to_numeric_inplace(df, ["median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"])
+
+df["inspection_intensity"] = df["n_inspections"] / df["n_unique_restaurants"]
+df.loc[df["n_unique_restaurants"] == 0, "inspection_intensity"] = np.nan
+df["inspection_intensity"] = df["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
+
+df = safe_log_income(df, "median_income_proxy")  # should create df["log_income"]
+
+# ---- Scatter 1: log income vs intensity ----
+chart_scatter_income_intensity = scatter_with_fit_altair(
+    df,
+    x="log_income",
+    y="inspection_intensity",
+    xlabel="Log Median Household Income",
+    ylabel="Inspection Intensity (Inspections per Restaurant)",
+    title="Income and Inspection Intensity Across NYC NTAs",
+    out_html="scatter_income_vs_intensity.html",
+    x_domain=(10, 13),
+    x_ticks=[10, 11, 12, 13],
+)
+
+# ---- Scatter 2: log income vs avg score ----
+chart_scatter_income_score = scatter_with_fit_altair(
+    df,
+    x="log_income",
+    y="avg_score",
+    xlabel="Log Median Household Income",
+    ylabel="Average Inspection Score (higher = worse)",
+    title="Income and Food Safety Risk Measured by Average Score (NTA)",
+    out_html="scatter_income_vs_score.html",
+    x_domain=(10, 13),
+    x_ticks=[10, 11, 12, 13],
+)
+
+# ---- Scatter 3: intensity vs avg score ----
+chart_scatter_intensity_score = scatter_with_fit_altair_simple(
+    df,
+    x="inspection_intensity",
+    y="avg_score",
+    xlabel="Inspection Intensity (Inspections per Restaurant)",
+    ylabel="Average Inspection Score (higher = worse)",
+    title="Inspection Intensity and Food Safety Risk Measured by Average Score (NTA)",
+    out_html="scatter_intensity_vs_score.html",
+)
+
+# Show in Quarto HTML
+display(chart_scatter_income_intensity)
+display(chart_scatter_income_score)
+display(chart_scatter_intensity_score)
+```
+
+
+
+```{python}
+# ====================================================
+# 5) Stacked bar: income quintile vs inspection stage
+# ====================================================
+
+def extract_stage(inspection_type: pd.Series) -> pd.Series:
+    split = inspection_type.astype(str).str.split("/", n=1, expand=True)
+    if split.shape[1] == 2:
+        stage = split[1].str.strip()
+        stage = stage.where(stage.notna() & (stage != ""), "Unknown")
+        return stage
+    return pd.Series(["Unknown"] * len(inspection_type), index=inspection_type.index)
+
+
+ensure_exists(INSP_PARQUET, "inspections parquet")
+insp = pd.read_parquet(INSP_PARQUET).copy()
+
+ensure_cols(insp, ["median_income_proxy", "INSPECTION TYPE"], "inspections parquet (stacked stage)")
+
+insp["median_income_proxy"] = pd.to_numeric(insp["median_income_proxy"], errors="coerce")
+insp = insp.dropna(subset=["median_income_proxy", "INSPECTION TYPE"])
+insp = insp[insp["median_income_proxy"] > 0]
+
+quintile_labels = ["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
+insp["income_quintile"] = pd.qcut(
+    insp["median_income_proxy"],
+    5,
+    labels=quintile_labels,
+)
+
+insp["inspection_stage"] = extract_stage(insp["INSPECTION TYPE"])
+
+top_stages = insp["inspection_stage"].value_counts().index[:5]
+insp["inspection_stage"] = insp["inspection_stage"].where(insp["inspection_stage"].isin(top_stages), "Other")
+
+stage_share = (
+    insp.groupby(["income_quintile", "inspection_stage"], observed=True)
+    .size()
+    .reset_index(name="n")
+)
+stage_share["share"] = stage_share.groupby("income_quintile", observed=True)["n"].transform(lambda s: s / s.sum())
+
+# -------------------- NEW: legend order by total share (large -> small) --------------------
+stage_totals = stage_share.groupby("inspection_stage", as_index=False)["n"].sum()
+stage_totals["share_total"] = stage_totals["n"] / stage_totals["n"].sum()
+
+# This order controls BOTH legend order and stack order
+stage_order = (
+    stage_totals.sort_values("share_total", ascending=False)["inspection_stage"]
+    .tolist()
+)
+
+rank_map = {stage: i for i, stage in enumerate(stage_order)}
+stage_share["stage_rank"] = stage_share["inspection_stage"].map(rank_map).astype(int)
+
+# labels only for two stages
+label_stages = ["Initial Inspection", "Re-inspection"]
+label_df = stage_share[stage_share["inspection_stage"].isin(label_stages)].copy()
+label_df["share_pct_1d"] = (label_df["share"] * 100).round(1).map(lambda v: f"{v:.1f}%")
+label_df["stage_rank"] = label_df["inspection_stage"].map(rank_map).astype(int)
+
+# -------------------- Chart --------------------
+sort_quintiles = quintile_labels
+
+base = alt.Chart(stage_share).properties(
+    title=alt.TitleParams(
+        text="Inspection Stage Shares by Income Quintile",
+        anchor="middle",
+        fontSize=18,
+        offset=10,
+    ),
+    width=700,
+    height=420,
+)
+
+x_enc = alt.X(
+    "income_quintile:N",
+    title="Income Quintile",
+    sort=sort_quintiles,
+    axis=alt.Axis(labelAngle=0),
+)
+
+bars = base.mark_bar().encode(
+    x=x_enc,
+    y=alt.Y("share:Q", title="Share of Inspections", axis=alt.Axis(format="%")),
+    color=alt.Color(
+        "inspection_stage:N",
+        title="Inspection Stage",
+        sort=stage_order,
+    ),
+    order=alt.Order("stage_rank:Q"),
+    tooltip=[
+        alt.Tooltip("income_quintile:N", title="Income Quintile"),
+        alt.Tooltip("inspection_stage:N", title="Stage"),
+        alt.Tooltip("n:Q", title="Count", format=",.0f"),
+        alt.Tooltip("share:Q", title="Share", format=".2%"),
+    ],
+)
+
+labels = alt.Chart(label_df).mark_text(
+    color="white",
+    font="Arial",
+    fontSize=12,
+    fontWeight="bold",
+    dy=10,
+).encode(
+    x=x_enc,
+    y=alt.Y("share:Q", stack="center"),
+    text=alt.Text("share_pct_1d:N"),
+    order=alt.Order("stage_rank:Q"),
+)
+
+chart_stage = (bars + labels).interactive()
+
+save_chart_html(chart_stage, OUTDIR, "stacked_income_quintile_vs_stage.html")
+chart_stage
+```
+
+
+
+
+```{python}
+# =====================================================
+# 6) Trend: slope of (intensity ~ log_income) by year
+# =====================================================
+
+def get_inspection_date(df: pd.DataFrame) -> pd.Series:
+    if "inspection_date" in df.columns:
+        return pd.to_datetime(df["inspection_date"], errors="coerce")
+    if "INSPECTION DATE" in df.columns:
+        return pd.to_datetime(df["INSPECTION DATE"], errors="coerce")
+    raise ValueError("Need 'inspection_date' or 'INSPECTION DATE' column.")
+
+
+dfi = pd.read_parquet(INSP_PARQUET).copy()
+dfi["inspection_date"] = get_inspection_date(dfi)
+
+dfi = dfi[dfi["inspection_date"].notna()]
+dfi = dfi[dfi["inspection_date"] != pd.Timestamp("1900-01-01")]
+dfi["year"] = dfi["inspection_date"].dt.year
+
+ensure_cols(dfi, ["nta", "CAMIS", "median_income_proxy"], "inspections parquet (trend slope)")
+dfi["nta"] = clean_key(dfi["nta"])
+dfi["median_income_proxy"] = pd.to_numeric(dfi["median_income_proxy"], errors="coerce")
+dfi = dfi.dropna(subset=["nta", "CAMIS", "median_income_proxy"])
+dfi = dfi[dfi["median_income_proxy"] > 0]
+dfi["log_income"] = np.log(dfi["median_income_proxy"])
+
+nta_year = (
+    dfi.groupby(["year", "nta"], as_index=False)
+    .agg(
+        n_inspections=("CAMIS", "size"),
+        n_unique_restaurants=("CAMIS", "nunique"),
+        log_income=("log_income", "first"),
+    )
+)
+nta_year["inspection_intensity"] = nta_year["n_inspections"] / nta_year["n_unique_restaurants"]
+nta_year = nta_year[
+    np.isfinite(nta_year["inspection_intensity"]) & np.isfinite(nta_year["log_income"])
+].copy()
+
+min_nta = 30
+results = []
+for year in sorted(nta_year["year"].unique()):
+    sub = nta_year[nta_year["year"] == year]
+    if len(sub) < min_nta:
+        continue
+    z = np.polyfit(sub["log_income"], sub["inspection_intensity"], 1)
+    results.append({"year": int(year), "slope": float(z[0]), "n_nta": int(len(sub))})
+
+slopes = pd.DataFrame(results)
+if slopes.empty:
+    raise ValueError("No year has enough NTA observations to estimate slopes.")
+
+csvpath = OUTDIR / "trend_slope_intensity_on_income_by_year.csv"
+slopes.to_csv(csvpath, index=False)
+print("[Saved]", csvpath)
+
+# ---- Main line chart ----
+chart_trend = (
+    alt.Chart(slopes)
+    .mark_line()
+    .encode(
+        x=alt.X("year:O", title="Year", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("slope:Q", title="Slope of intensity ~ log_income"),
+        tooltip=[
+            alt.Tooltip("year:O", title="Year"),
+            alt.Tooltip("slope:Q", title="Slope", format=",.4f"),
+            alt.Tooltip("n_nta:Q", title="N NTA", format=",.0f"),
+        ],
+    )
+    .properties(
+        title=alt.TitleParams(
+            text="Yearly Slope of Inspection Intensity on Income (NTA-Level)",
+            anchor="middle",
+            fontSize=18,
+            offset=10,
+        ),
+        width=700,
+        height=420,
+    )
+)
+
+# ---- Points ----
+points = (
+    alt.Chart(slopes)
+    .mark_circle(size=60)
+    .encode(
+        x=alt.X("year:O", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("slope:Q"),
+        tooltip=[
+            alt.Tooltip("year:O", title="Year"),
+            alt.Tooltip("slope:Q", title="Slope", format=",.4f"),
+            alt.Tooltip("n_nta:Q", title="N NTA", format=",.0f"),
+        ],
+    )
+)
+
+# ---- 0 reference line: red dashed ----
+zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+    color="red",
+    strokeWidth=2,
+    strokeDash=[6, 6],
+).encode(
+    y="y:Q"
+)
+
+chart_trend_final = (zero_line + chart_trend + points).interactive()
+
+save_chart_html(chart_trend_final, OUTDIR, "trend_slope_intensity_on_income_by_year.html")
+chart_trend_final
+```
+
+
