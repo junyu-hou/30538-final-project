@@ -17,21 +17,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import altair as alt
+from IPython.display import display
 ```
+
 
 
 ```{python}
 # =========================================================
 # 0) Paths & shared utilities  (RELATIVE PATHS ONLY)
 # =========================================================
-
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import geopandas as gpd
-import altair as alt
-
 
 def ensure_exists(path: Path, what: str) -> None:
     if not path.exists():
@@ -96,186 +90,101 @@ print("OUTDIR       =", OUTDIR)
 ```
 
 
-```{python}
-# =========================================================
-# 1) Load NTA geometry
-# =========================================================
-
-ensure_exists(RAW_NTA_SHP, "NTA shapefile")
-nta_gdf = gpd.read_file(RAW_NTA_SHP)
-
-NTA_CODE_COL = "nta2020"
-ensure_cols(nta_gdf, [NTA_CODE_COL], "NTA shapefile")
-
-nta_gdf = nta_gdf.copy()
-nta_gdf["nta"] = clean_key(nta_gdf[NTA_CODE_COL])
-
-nta_gdf = nta_gdf.to_crs(epsg=4326)
-
-nta_gdf.head(2)
-```
 
 ```{python}
 # =========================================================
-# 2) One generic Altair choropleth function
-# =========================================================
-
-def plot_nta_choropleth_altair(
-    gdf: gpd.GeoDataFrame,
-    value_col: str,
-    title: str,
-    legend_title: str,
-    scheme: str = "viridis",
-    tooltip_format: str = ",.2f",
-    output_html: str | None = None,
-    width: int = 700,
-    height: int = 700,
-) -> alt.Chart:
-    if value_col not in gdf.columns:
-        raise ValueError(f"'{value_col}' not in GeoDataFrame columns.")
-
-    geojson = gdf.__geo_interface__
-
-    chart = (
-        alt.Chart(alt.Data(values=geojson["features"]))
-        .mark_geoshape(stroke="white", strokeWidth=0.3)
-        .encode(
-            color=alt.Color(
-                f"properties.{value_col}:Q",
-                title=legend_title,
-                scale=alt.Scale(scheme=scheme),
-            ),
-            tooltip=[
-                alt.Tooltip("properties.nta:N", title="NTA"),
-                alt.Tooltip(
-                    f"properties.{value_col}:Q",
-                    title=legend_title,
-                    format=tooltip_format
-                ),
-            ],
-        )
-        .properties(title=title, width=width, height=height)
-        .project(type="mercator")
-    )
-
-    if output_html is not None:
-        outpath = OUTDIR / output_html
-        outpath.parent.mkdir(parents=True, exist_ok=True)
-        chart.save(str(outpath))
-        print("[Saved]", outpath)
-
-    return chart
-```
-
-
-
-```{python}
-# =========================================================
-# Map 1: NYC NTA Median Household Income
-# =========================================================
-
-ensure_exists(INCOME_CSV, "income CSV")
-income_df = pd.read_csv(INCOME_CSV)
-
-ensure_cols(income_df, ["nta", "median_income_proxy"], "income CSV")
-income_df = income_df.copy()
-income_df["nta"] = clean_key(income_df["nta"])
-to_numeric_inplace(income_df, ["median_income_proxy"])
-
-gdf_income = nta_gdf.merge(income_df[["nta", "median_income_proxy"]], on="nta", how="left")
-print("Share missing income after merge:", f"{gdf_income['median_income_proxy'].isna().mean():.2%}")
-
-chart1 = plot_nta_choropleth_altair(
-    gdf_income,
-    value_col="median_income_proxy",
-    title="NYC NTA Median Household Income (Proxy)",
-    legend_title="Median household income",
-    scheme="viridis",
-    tooltip_format=",.0f",
-    output_html="nta_income_map.html",
-)
-chart1
-```
-
-
-```{python}
-# =========================================================
-# Map 2: NYC NTA Food Safety Risk (Average Inspection Score)
-# =========================================================
-
-ensure_exists(SUMMARY_CSV, "inspection summary CSV")
-summ = pd.read_csv(SUMMARY_CSV)
-
-ensure_cols(summ, ["nta", "avg_score"], "summary CSV")
-summ = summ.copy()
-summ["nta"] = clean_key(summ["nta"])
-to_numeric_inplace(summ, ["avg_score"])
-
-gdf_score = nta_gdf.merge(summ[["nta", "avg_score"]], on="nta", how="left")
-print("Share missing avg_score after merge:", f"{gdf_score['avg_score'].isna().mean():.2%}")
-
-chart2 = plot_nta_choropleth_altair(
-    gdf_score,
-    value_col="avg_score",
-    title="NYC NTA Food Risk (Average Inspection Score)",
-    legend_title="Avg score (higher = worse)",
-    scheme="reds",
-    tooltip_format=",.2f",
-    output_html="nta_avg_score_map.html",
-)
-chart2
-```
-
-
-```{python}
-# =========================================================
-# Map 3: NYC Restaurant Inspection Intensity by NTA
-# =========================================================
-
-ensure_cols(summ, ["nta", "n_inspections", "n_unique_restaurants"], "summary CSV (intensity)")
-to_numeric_inplace(summ, ["n_inspections", "n_unique_restaurants"])
-
-summ["inspection_intensity"] = summ["n_inspections"] / summ["n_unique_restaurants"]
-summ.loc[summ["n_unique_restaurants"] == 0, "inspection_intensity"] = np.nan
-summ["inspection_intensity"] = summ["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
-
-gdf_intensity = nta_gdf.merge(
-    summ[["nta", "inspection_intensity", "n_inspections", "n_unique_restaurants"]],
-    on="nta",
-    how="left",
-)
-print("Share missing intensity after merge:", f"{gdf_intensity['inspection_intensity'].isna().mean():.2%}")
-
-chart3 = plot_nta_choropleth_altair(
-    gdf_intensity,
-    value_col="inspection_intensity",
-    title="NYC Restaurant Inspection Intensity (Inspections per Restaurant)",
-    legend_title="Inspections / restaurant",
-    scheme="viridis",
-    tooltip_format=",.2f",
-    output_html="nta_inspection_intensity_map.html",
-)
-chart3
-```
-
-
-
-
-```{python}
-# =========================================================
-# 3) Static plots (scatter + stacked + trend) -- Altair HTML ONLY
+# 1) Static plots (scatter + stacked + trend) -- Altair HTML ONLY
 # =========================================================
 
 def save_chart_html(chart: alt.Chart, outdir: Path, filename: str) -> Path:
-    """
-    Save Altair chart as HTML (always). Return saved path.
-    """
+    """Save Altair chart as HTML (always). Return saved path."""
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / filename
     chart.save(str(outpath))
     print("[Saved]", outpath)
     return outpath
 
+def _compute_slope(dd: pd.DataFrame, x: str, y: str) -> float:
+    """OLS slope of y ~ x (with intercept)."""
+    X = dd[x].to_numpy(dtype=float)
+    Y = dd[y].to_numpy(dtype=float)
+    slope = np.polyfit(X, Y, 1)[0]
+    return float(slope)
+
+def _beauty_config(chart: alt.Chart) -> alt.Chart:
+    """统一美化风格（更清晰更干净）"""
+    return (
+        chart
+        .configure_view(stroke=None)
+        .configure_title(fontSize=18, font="Arial", anchor="middle", offset=10)
+        .configure_axis(
+            labelFont="Arial",
+            titleFont="Arial",
+            labelFontSize=12,
+            titleFontSize=13,
+            grid=True,
+            gridOpacity=0.25,
+            tickSize=5,
+        )
+    )
+
+def _boxed_annotation(
+    slope: float,
+    width: int,
+    height: int,
+    pad_right: int = 6,
+    pad_bottom: int = 6,
+    box_h: int = 20,
+    font_size: int = 11,
+    pad_lr: int = 6,
+    est_char_px: int = 6,
+) -> alt.LayerChart:
+    label = f"β̂ = {slope:.3f}"
+
+    # tighter width estimate
+    box_w = pad_lr * 2 + est_char_px * len(label)
+
+    box_x = width - pad_right
+    box_y = height - pad_bottom
+    box_left = box_x - box_w
+    box_top = box_y - box_h
+
+    df_label = pd.DataFrame({"label": [label]})
+
+    box = (
+        alt.Chart(df_label)
+        .mark_rect(
+            cornerRadius=6,
+            fill="white",
+            stroke="#888888",
+            strokeWidth=1,
+            opacity=0.95,
+        )
+        .encode(
+            x=alt.value(box_left),
+            x2=alt.value(box_x),
+            y=alt.value(box_top),
+            y2=alt.value(box_y),
+        )
+    )
+
+    text = (
+        alt.Chart(df_label)
+        .mark_text(
+            align="right",
+            baseline="middle",
+            font="Arial",
+            fontSize=font_size,
+            fontWeight="bold",
+        )
+        .encode(
+            x=alt.value(box_x - pad_lr),
+            y=alt.value((box_top + box_y) / 2),
+            text="label:N",
+        )
+    )
+
+    return box + text
 
 def scatter_with_fit_altair(
     d: pd.DataFrame,
@@ -285,15 +194,15 @@ def scatter_with_fit_altair(
     ylabel: str,
     title: str,
     out_html: str,
-    x_domain: tuple[float, float] = (10, 13),
-    x_ticks: list[float] = [10, 11, 12, 13],
-    width: int = 600,
-    height: int = 420,
+    x_domain: tuple[float, float] | None = (10, 13),
+    x_ticks: list[float] | None = [10, 11, 12, 13],
+    width: int = 720,
+    height: int = 440,
 ) -> alt.Chart:
     """
-    Scatter + OLS regression line (red) using Altair.
-    Force x-axis domain and ticks (for log_income aesthetics).
-    Save as HTML and return the chart (for Quarto display).
+    Scatter + OLS regression line (red) + boxed β̂ at bottom-right.
+    Optional forced x-axis domain/ticks.
+    Save as HTML and return chart (for Quarto display).
     """
     if x not in d.columns or y not in d.columns:
         raise ValueError(f"scatter_with_fit_altair needs columns: {x}, {y}")
@@ -305,36 +214,97 @@ def scatter_with_fit_altair(
     if len(dd) < 2:
         raise ValueError(f"Not enough valid rows to plot: {title}")
 
-    x_enc = alt.X(
-        f"{x}:Q",
-        title=xlabel,
-        scale=alt.Scale(domain=list(x_domain)),
-        axis=alt.Axis(values=x_ticks, format=".0f"),
-    )
+    slope = _compute_slope(dd, x, y)
+
+    # x axis controls
+    x_scale = alt.Scale() if x_domain is None else alt.Scale(domain=list(x_domain))
+    x_axis = alt.Axis()
+    if x_ticks is not None:
+        x_axis = alt.Axis(values=x_ticks, format=".0f")
 
     base = alt.Chart(dd).properties(title=title, width=width, height=height)
 
-    points = base.mark_circle(opacity=0.6).encode(
-        x=x_enc,
+    points = base.mark_circle(size=70, opacity=0.55).encode(
+        x=alt.X(f"{x}:Q", title=xlabel, scale=x_scale, axis=x_axis),
         y=alt.Y(f"{y}:Q", title=ylabel),
         tooltip=[
-            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.2f"),
-            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.2f"),
+            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.3f"),
+            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.3f"),
         ],
     )
 
     # regression line in red
-    line = base.transform_regression(x, y).mark_line(color="red", strokeWidth=2.5).encode(
-        x=x_enc,
-        y=alt.Y(f"{y}:Q"),
+    line = (
+        base
+        .transform_regression(x, y)
+        .mark_line(color="red", strokeWidth=3)
+        .encode(
+            x=alt.X(f"{x}:Q", scale=x_scale, axis=x_axis),
+            y=alt.Y(f"{y}:Q"),
+        )
     )
 
-    chart = (points + line).interactive()
+    annotation = _boxed_annotation(slope, width=width, height=height)
+
+    chart = _beauty_config((points + line + annotation).interactive())
     save_chart_html(chart, OUTDIR, out_html)
     return chart
 
+def scatter_with_fit_altair_simple(
+    d: pd.DataFrame,
+    x: str,
+    y: str,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    out_html: str,
+    width: int = 720,
+    height: int = 440,
+) -> alt.Chart:
+    """
+    Scatter + OLS regression line (red) + boxed β̂ at bottom-right.
+    No forced x-axis range.
+    """
+    if x not in d.columns or y not in d.columns:
+        raise ValueError(f"scatter_with_fit_altair_simple needs columns: {x}, {y}")
 
-# ---- Load summary again ----
+    dd = d[[x, y]].copy()
+    dd[x] = pd.to_numeric(dd[x], errors="coerce")
+    dd[y] = pd.to_numeric(dd[y], errors="coerce")
+    dd = dd[np.isfinite(dd[x]) & np.isfinite(dd[y])].copy()
+    if len(dd) < 2:
+        raise ValueError(f"Not enough valid rows to plot: {title}")
+
+    slope = _compute_slope(dd, x, y)
+
+    base = alt.Chart(dd).properties(title=title, width=width, height=height)
+
+    points = base.mark_circle(size=70, opacity=0.55).encode(
+        x=alt.X(f"{x}:Q", title=xlabel),
+        y=alt.Y(f"{y}:Q", title=ylabel),
+        tooltip=[
+            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.3f"),
+            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.3f"),
+        ],
+    )
+
+    line = (
+        base
+        .transform_regression(x, y)
+        .mark_line(color="red", strokeWidth=3)
+        .encode(
+            x=alt.X(f"{x}:Q"),
+            y=alt.Y(f"{y}:Q"),
+        )
+    )
+
+    annotation = _boxed_annotation(slope, width=width, height=height)
+
+    chart = _beauty_config((points + line + annotation).interactive())
+    save_chart_html(chart, OUTDIR, out_html)
+    return chart
+
+# ------------------- Load data & build charts -------------------
 df = pd.read_csv(SUMMARY_CSV).copy()
 ensure_cols(
     df,
@@ -348,16 +318,16 @@ df["inspection_intensity"] = df["n_inspections"] / df["n_unique_restaurants"]
 df.loc[df["n_unique_restaurants"] == 0, "inspection_intensity"] = np.nan
 df["inspection_intensity"] = df["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
 
-df = safe_log_income(df, "median_income_proxy")
+df = safe_log_income(df, "median_income_proxy")  # should create df["log_income"]
 
 # ---- Scatter 1: log income vs intensity ----
 chart_scatter_income_intensity = scatter_with_fit_altair(
     df,
     x="log_income",
     y="inspection_intensity",
-    xlabel="Log Median Household Income (proxy)",
+    xlabel="Log Median Household Income",
     ylabel="Inspection Intensity (Inspections per Restaurant)",
-    title="Income vs Inspection Intensity (NTA)",
+    title="Income and Inspection Intensity Across NYC NTAs",
     out_html="scatter_income_vs_intensity.html",
     x_domain=(10, 13),
     x_ticks=[10, 11, 12, 13],
@@ -368,74 +338,36 @@ chart_scatter_income_score = scatter_with_fit_altair(
     df,
     x="log_income",
     y="avg_score",
-    xlabel="Log Median Household Income (proxy)",
+    xlabel="Log Median Household Income",
     ylabel="Average Inspection Score (higher = worse)",
-    title="Income vs Average Score (NTA)",
+    title="Income and Food Safety Risk Measured by Average Score (NTA)",
     out_html="scatter_income_vs_score.html",
     x_domain=(10, 13),
     x_ticks=[10, 11, 12, 13],
 )
 
-# ---- Scatter 3: intensity vs avg score (no forced x range here) ----
-def scatter_with_fit_altair_simple(
-    d: pd.DataFrame,
-    x: str,
-    y: str,
-    xlabel: str,
-    ylabel: str,
-    title: str,
-    out_html: str,
-    width: int = 600,
-    height: int = 420,
-) -> alt.Chart:
-    dd = d[[x, y]].copy()
-    dd[x] = pd.to_numeric(dd[x], errors="coerce")
-    dd[y] = pd.to_numeric(dd[y], errors="coerce")
-    dd = dd[np.isfinite(dd[x]) & np.isfinite(dd[y])].copy()
-    if len(dd) < 2:
-        raise ValueError(f"Not enough valid rows to plot: {title}")
-
-    base = alt.Chart(dd).properties(title=title, width=width, height=height)
-
-    points = base.mark_circle(opacity=0.6).encode(
-        x=alt.X(f"{x}:Q", title=xlabel),
-        y=alt.Y(f"{y}:Q", title=ylabel),
-        tooltip=[
-            alt.Tooltip(f"{x}:Q", title=xlabel, format=",.2f"),
-            alt.Tooltip(f"{y}:Q", title=ylabel, format=",.2f"),
-        ],
-    )
-
-    line = base.transform_regression(x, y).mark_line(color="red", strokeWidth=2.5).encode(
-        x=alt.X(f"{x}:Q"),
-        y=alt.Y(f"{y}:Q"),
-    )
-
-    chart = (points + line).interactive()
-    save_chart_html(chart, OUTDIR, out_html)
-    return chart
-
-
+# ---- Scatter 3: intensity vs avg score ----
 chart_scatter_intensity_score = scatter_with_fit_altair_simple(
     df,
     x="inspection_intensity",
     y="avg_score",
     xlabel="Inspection Intensity (Inspections per Restaurant)",
     ylabel="Average Inspection Score (higher = worse)",
-    title="Inspection Intensity vs Average Score (NTA)",
+    title="Inspection Intensity and Food Safety Risk Measured by Average Score (NTA)",
     out_html="scatter_intensity_vs_score.html",
 )
 
 # Show in Quarto HTML
-chart_scatter_income_intensity
+display(chart_scatter_income_intensity)
+display(chart_scatter_income_score)
+display(chart_scatter_intensity_score)
+```
 
-chart_scatter_income_score
-
-chart_scatter_intensity_score
 
 
+```{python}
 # =========================================================
-# 4) Stacked bar: income quintile vs inspection stage -- Altair HTML ONLY
+# 2) Stacked bar: income quintile vs inspection stage -- Altair HTML ONLY
 # =========================================================
 
 def extract_stage(inspection_type: pd.Series) -> pd.Series:
@@ -456,10 +388,11 @@ insp["median_income_proxy"] = pd.to_numeric(insp["median_income_proxy"], errors=
 insp = insp.dropna(subset=["median_income_proxy", "INSPECTION TYPE"])
 insp = insp[insp["median_income_proxy"] > 0]
 
+quintile_labels = ["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"]
 insp["income_quintile"] = pd.qcut(
     insp["median_income_proxy"],
     5,
-    labels=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"],
+    labels=quintile_labels,
 )
 
 insp["inspection_stage"] = extract_stage(insp["INSPECTION TYPE"])
@@ -468,44 +401,94 @@ top_stages = insp["inspection_stage"].value_counts().index[:5]
 insp["inspection_stage"] = insp["inspection_stage"].where(insp["inspection_stage"].isin(top_stages), "Other")
 
 stage_share = (
-    insp.groupby(["income_quintile", "inspection_stage"])
+    insp.groupby(["income_quintile", "inspection_stage"], observed=True)
     .size()
     .reset_index(name="n")
 )
-stage_share["share"] = stage_share.groupby("income_quintile")["n"].transform(lambda s: s / s.sum())
+stage_share["share"] = stage_share.groupby("income_quintile", observed=True)["n"].transform(lambda s: s / s.sum())
 
-chart_stage = (
-    alt.Chart(stage_share)
-    .mark_bar()
-    .encode(
-        x=alt.X(
-            "income_quintile:N",
-            title="Income Quintile",
-            sort=["Q1 (Lowest)", "Q2", "Q3", "Q4", "Q5 (Highest)"],
-        ),
-        y=alt.Y("share:Q", title="Share of Inspections", axis=alt.Axis(format="%")),
-        color=alt.Color("inspection_stage:N", title="Inspection Stage"),
-        tooltip=[
-            alt.Tooltip("income_quintile:N", title="Income Quintile"),
-            alt.Tooltip("inspection_stage:N", title="Stage"),
-            alt.Tooltip("n:Q", title="Count", format=",.0f"),
-            alt.Tooltip("share:Q", title="Share", format=".2%"),
-        ],
-    )
-    .properties(
-        title="Income Quintile vs Inspection Stage (Stacked Share)",
-        width=700,
-        height=420,
-    )
-    .interactive()
+# -------------------- NEW: legend order by total share (large -> small) --------------------
+stage_totals = stage_share.groupby("inspection_stage", as_index=False)["n"].sum()
+stage_totals["share_total"] = stage_totals["n"] / stage_totals["n"].sum()
+
+# This order controls BOTH legend order and stack order
+stage_order = (
+    stage_totals.sort_values("share_total", ascending=False)["inspection_stage"]
+    .tolist()
 )
+
+rank_map = {stage: i for i, stage in enumerate(stage_order)}
+stage_share["stage_rank"] = stage_share["inspection_stage"].map(rank_map).astype(int)
+
+# labels only for two stages
+label_stages = ["Initial Inspection", "Re-inspection"]
+label_df = stage_share[stage_share["inspection_stage"].isin(label_stages)].copy()
+label_df["share_pct_1d"] = (label_df["share"] * 100).round(1).map(lambda v: f"{v:.1f}%")
+label_df["stage_rank"] = label_df["inspection_stage"].map(rank_map).astype(int)
+
+# -------------------- Chart --------------------
+sort_quintiles = quintile_labels
+
+base = alt.Chart(stage_share).properties(
+    title=alt.TitleParams(
+        text="Inspection Stage Shares by Income Quintile",
+        anchor="middle",
+        fontSize=18,
+        offset=10,
+    ),
+    width=700,
+    height=420,
+)
+
+x_enc = alt.X(
+    "income_quintile:N",
+    title="Income Quintile",
+    sort=sort_quintiles,
+    axis=alt.Axis(labelAngle=0),
+)
+
+bars = base.mark_bar().encode(
+    x=x_enc,
+    y=alt.Y("share:Q", title="Share of Inspections", axis=alt.Axis(format="%")),
+    color=alt.Color(
+        "inspection_stage:N",
+        title="Inspection Stage",
+        sort=stage_order,  # ✅ legend order: total share (desc)
+    ),
+    order=alt.Order("stage_rank:Q"),  # ✅ stack order matches legend
+    tooltip=[
+        alt.Tooltip("income_quintile:N", title="Income Quintile"),
+        alt.Tooltip("inspection_stage:N", title="Stage"),
+        alt.Tooltip("n:Q", title="Count", format=",.0f"),
+        alt.Tooltip("share:Q", title="Share", format=".2%"),
+    ],
+)
+
+labels = alt.Chart(label_df).mark_text(
+    color="white",
+    font="Arial",
+    fontSize=12,
+    fontWeight="bold",
+    dy=10,
+).encode(
+    x=x_enc,
+    y=alt.Y("share:Q", stack="center"),
+    text=alt.Text("share_pct_1d:N"),
+    order=alt.Order("stage_rank:Q"),
+)
+
+chart_stage = (bars + labels).interactive()
 
 save_chart_html(chart_stage, OUTDIR, "stacked_income_quintile_vs_stage.html")
 chart_stage
+```
 
 
+
+
+```{python}
 # =========================================================
-# 5) Trend: slope of (intensity ~ log_income) by year -- Altair HTML ONLY
+# 3) Trend: slope of (intensity ~ log_income) by year -- Altair HTML ONLY
 # =========================================================
 
 def get_inspection_date(df: pd.DataFrame) -> pd.Series:
@@ -560,11 +543,12 @@ csvpath = OUTDIR / "trend_slope_intensity_on_income_by_year.csv"
 slopes.to_csv(csvpath, index=False)
 print("[Saved]", csvpath)
 
+# ---- Main line chart ----
 chart_trend = (
     alt.Chart(slopes)
     .mark_line()
     .encode(
-        x=alt.X("year:O", title="Year"),
+        x=alt.X("year:O", title="Year", axis=alt.Axis(labelAngle=0)),
         y=alt.Y("slope:Q", title="Slope of intensity ~ log_income"),
         tooltip=[
             alt.Tooltip("year:O", title="Year"),
@@ -573,19 +557,45 @@ chart_trend = (
         ],
     )
     .properties(
-        title="Income–Inspection Intensity Relationship Over Time",
+        title=alt.TitleParams(
+            text="Yearly Slope of Inspection Intensity on Income (NTA-Level)",
+            anchor="middle",
+            fontSize=18,
+            offset=10,
+        ),
         width=700,
         height=420,
     )
 )
 
-zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule().encode(y="y:Q")
+# ---- Points ----
+points = (
+    alt.Chart(slopes)
+    .mark_circle(size=60)
+    .encode(
+        x=alt.X("year:O", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("slope:Q"),
+        tooltip=[
+            alt.Tooltip("year:O", title="Year"),
+            alt.Tooltip("slope:Q", title="Slope", format=",.4f"),
+            alt.Tooltip("n_nta:Q", title="N NTA", format=",.0f"),
+        ],
+    )
+)
 
-chart_trend_final = (zero + chart_trend + chart_trend.mark_circle(size=60)).interactive()
+# ---- 0 reference line: blue dashed ----
+zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+    color="red",
+    strokeWidth=2,
+    strokeDash=[6, 6],
+).encode(
+    y="y:Q"
+)
+
+chart_trend_final = (zero_line + chart_trend + points).interactive()
 
 save_chart_html(chart_trend_final, OUTDIR, "trend_slope_intensity_on_income_by_year.html")
 chart_trend_final
-
 ```
 
 
