@@ -9,6 +9,9 @@ __pycache__/
 venv/
 env/
 
+writeup_files/
+/code/plot_files/
+
 # ---- data ----
 *.zip
 *.7z
