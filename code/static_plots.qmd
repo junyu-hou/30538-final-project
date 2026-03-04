@@ -298,6 +298,46 @@ def _add_fixed_legend_topright(
     m.get_root().add_child(macro)
 
 
+def _add_map_title(
+    m: folium.Map,
+    title: str = "NYC Income Map",
+    subtitle: str | None = "Median Household Income by NTA",
+    top_offset_px: int = 20,
+):
+    template = f"""
+    {{% macro html(this, kwargs) %}}
+    <div style="
+        position: fixed;
+        top: {top_offset_px}px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 9999;
+
+        background: rgba(255,255,255,0.95);
+        padding: 10px 20px;
+        border-radius: 14px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+
+        font-family: Arial, sans-serif;
+        text-align: center;
+    ">
+        <div style="
+            font-size:20px;
+            font-weight:800;
+            margin-bottom:4px;
+        ">
+            {title}
+        </div>
+        {f'<div style="font-size:13px; color:#444;">{subtitle}</div>' if subtitle else ''}
+    </div>
+    {{% endmacro %}}
+    """
+
+    macro = MacroElement()
+    macro._template = Template(template)
+    m.get_root().add_child(macro)
+
+
 # =======================================
 # Map 1: NYC NTA Median Household Income
 # =======================================
@@ -364,6 +404,14 @@ def make_nta_income_map_with_fixed_scale(
         zoom_start=zoom_start,
         tiles=tiles,
         control_scale=True,
+    )
+
+    # add map title
+    _add_map_title(
+        m,
+        title="NYC Income Map",
+        subtitle="Median Household Income by NTA",
+        top_offset_px=20,
     )
 
     # ----- fixed colormap -----
@@ -595,6 +643,14 @@ def make_nta_foodrisk_map_with_fixed_scale(
         control_scale=True,
     )
 
+    # add map title
+    _add_map_title(
+        m,
+        title="NYC Inspection Score Map",
+        subtitle="Average Inspection Score by NTA (Higher = Worse)",
+        top_offset_px=20,
+    )
+
     # ----- fixed colormap -----
     vmin, vmax = float(FIX_MIN), float(FIX_MAX)
     cmap = _make_reds_colormap(vmin, vmax)
@@ -689,9 +745,6 @@ def make_nta_foodrisk_map_with_fixed_scale(
 # =========================
 m2 = make_nta_foodrisk_map_with_fixed_scale(
     out_html=OUTDIR / "map2_food_safety_risk_avgscore_fixedscale.html",
-    FIX_MIN=10,
-    FIX_MAX=40,
-    TICK_STEP=10,
     legend_box_width=420,
     legend_title_size=14,
     legend_tick_size=10,
@@ -763,7 +816,7 @@ def make_nta_inspection_intensity_map_fixedscale_cividis(
         summ.loc[summ[n_unique_restaurants_col] == 0, "intensity_year"] = np.nan
         summ["intensity_year"] = summ["intensity_year"].replace([np.inf, -np.inf], np.nan)
 
-        def _wavg(g):
+        def _wavg(g: pd.DataFrame) -> float:
             x = g["intensity_year"].to_numpy(dtype=float)
             w = g[n_unique_restaurants_col].to_numpy(dtype=float)
             mask = np.isfinite(x) & np.isfinite(w) & (w > 0)
@@ -807,6 +860,14 @@ def make_nta_inspection_intensity_map_fixedscale_cividis(
         zoom_start=zoom_start,
         tiles=tiles,
         control_scale=True,
+    )
+
+    # Title
+    _add_map_title(
+        m,
+        title="NYC Inspection Intensity Map",
+        subtitle="Inspections per Restaurant per Year by NTA",
+        top_offset_px=20,
     )
 
     # ----- fixed scale + CIVIDIS colormap -----
@@ -901,15 +962,11 @@ def make_nta_inspection_intensity_map_fixedscale_cividis(
     return m
 
 
-# ==========
-# Run
-# ==========
+# =========================
+# Notebook / QMD usage
+# =========================
 m3 = make_nta_inspection_intensity_map_fixedscale_cividis(
-    summary_csv=SUMMARY_CSV_YEAR,
     out_html=OUTDIR / "map3_inspection_intensity_fixedscale.html",
-    FIX_MIN=2,
-    FIX_MAX=6,
-    TICK_STEP=1,
     legend_box_width=420,
     legend_title_size=14,
     legend_tick_size=10,
