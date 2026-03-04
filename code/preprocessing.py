@@ -3,10 +3,28 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 
-RAW = Path("data/raw-data")
-DERIVED = Path("data/derived-data")
+# =========================================================
+# Relative paths 
+# =========================================================
+
+# preprocessing.py lives in: final_project/code/
+# so repo root is one level up
+
+REPO = Path("..")
+
+if not (REPO / "data").is_dir() or not (REPO / "code").is_dir():
+    raise FileNotFoundError(
+        "Expected structure: ../data and ../code (run this script from code/)."
+    )
+
+RAW = REPO / "data" / "raw-data"
+DERIVED = REPO / "data" / "derived-data"
+
 DERIVED.mkdir(parents=True, exist_ok=True)
 
+print("REPO    =", REPO)
+print("RAW     =", RAW)
+print("DERIVED =", DERIVED)
 
 def read_acs_households(path: Path) -> pd.DataFrame:
     """
@@ -252,6 +270,28 @@ def main():
     print(" -", insp_out)
     print(" -", summary_out)
 
+    # ---- NTA-year inspection summary (for annual-normalized intensity) ----
+    if "inspection_date" not in insp_final.columns:
+        raise ValueError("Expected 'inspection_date' in insp_final")
+
+    insp_final["year"] = insp_final["inspection_date"].dt.year
+
+    summary_year = (
+        insp_final.dropna(subset=["year"])
+        .groupby(["nta", "year"], as_index=False)
+        .agg(
+            n_inspections=("CAMIS", "size"),
+            n_unique_restaurants=("CAMIS", "nunique"),
+            avg_score=("SCORE", "mean"),
+            share_grade_A=("is_A", "mean"),
+            households=("households", "first"),
+            median_income_proxy=("median_income_proxy", "first"),
+        )
+    )
+    summary_year_out = DERIVED / "nta_inspection_summary_by_year.csv"
+    summary_year.to_csv(summary_year_out, index=False)
+
+    print(" -", summary_year_out)
 
 if __name__ == "__main__":
     main()

@@ -130,6 +130,7 @@ NTA_DIR = RAW_DIR / "nta_2020"
 
 SUMMARY_CSV = DERIVED / "nta_inspection_summary.csv"
 INSP_PARQUET = DERIVED / "inspections_with_nta_income.parquet"
+SUMMARY_CSV_YEAR = DERIVED / "nta_inspection_summary_by_year.csv"
 
 # NOTE: RAW_NTA_SHP will be determined after ensuring data exists
 RAW_NTA_SHP: Path | None = None
@@ -142,12 +143,16 @@ DATA_URLS = {
     "INSP_PARQUET": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/inspections_with_nta_income.parquet",
     "SUMMARY_CSV": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/nta_inspection_summary.csv",
     "NTA_ZIP": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/nta_2020.zip",
+    "SUMMARY_CSV_YEAR": "https://github.com/junyu-hou/30538-final-project/releases/download/v1.0-data/nta_inspection_summary_by_year.csv",
 }
 
 
 # =========================================================
 # 2) Streamlit config
 # =========================================================
+INTENSITY_LABEL = "Inspection Intensity (Inspections per Restaurant per Year)"
+INTENSITY_SHORT = "Inspections / restaurant / year"
+
 st.set_page_config(page_title="NYC Restaurants — Income, Enforcement, Risk", layout="wide")
 st.title("NYC Restaurant Inspections: Income, Enforcement Intensity, and Food Safety Risk")
 st.caption("Left: NTA choropleth (PyDeck + CARTO basemap) | Right: scatter | Bottom: year slider")
@@ -160,6 +165,9 @@ try:
     # Derived data
     if not SUMMARY_CSV.exists():
         download_file(DATA_URLS["SUMMARY_CSV"], SUMMARY_CSV, "summary CSV")
+
+    if not SUMMARY_CSV_YEAR.exists():
+        download_file(DATA_URLS["SUMMARY_CSV_YEAR"], SUMMARY_CSV_YEAR, "summary CSV (by year)")
 
     if not INSP_PARQUET.exists():
         download_file(DATA_URLS["INSP_PARQUET"], INSP_PARQUET, "inspections parquet")
@@ -192,7 +200,10 @@ def load_nta_geometry(shp_path: str) -> gpd.GeoDataFrame:
             nta_code_col = c
             break
     if nta_code_col is None:
-        raise ValueError(f"[NTA shapefile] Cannot find NTA code column among {candidates}. Columns: {list(gdf.columns)[:30]}")
+        raise ValueError(
+            f"[NTA shapefile] Cannot find NTA code column among {candidates}. "
+            f"Columns: {list(gdf.columns)[:30]}"
+        )
 
     gdf["nta"] = clean_key(gdf[nta_code_col])
     gdf = gdf.to_crs(epsg=4326)
@@ -200,26 +211,58 @@ def load_nta_geometry(shp_path: str) -> gpd.GeoDataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_summary(summary_csv: str) -> pd.DataFrame:
+def load_summary(summary_csv: str, summary_csv_year: str) -> pd.DataFrame:
+    """
+    Load NTA-level summary (one row per NTA) for income/score,
+    then merge in annualized inspection intensity computed from NTA-year file.
+    """
     p = Path(summary_csv)
     ensure_exists(p, "inspection summary CSV")
 
+    # ---- base summary (1 row per NTA): income + avg_score ----
     df = pd.read_csv(p).copy()
-    ensure_cols(
-        df,
-        ["nta", "median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"],
-        "summary CSV",
-    )
+    ensure_cols(df, ["nta", "median_income_proxy", "avg_score"], "summary CSV")
     df["nta"] = clean_key(df["nta"])
-    to_numeric_inplace(df, ["median_income_proxy", "n_inspections", "n_unique_restaurants", "avg_score"])
-
-    df["inspection_intensity"] = df["n_inspections"] / df["n_unique_restaurants"]
-    df.loc[df["n_unique_restaurants"] == 0, "inspection_intensity"] = np.nan
-    df["inspection_intensity"] = df["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
+    to_numeric_inplace(df, ["median_income_proxy", "avg_score"])
 
     df = df.dropna(subset=["median_income_proxy"]).copy()
     df = df[df["median_income_proxy"] > 0].copy()
     df["log_income"] = np.log(df["median_income_proxy"])
+
+    # ---- annualized intensity from NTA-year summary ----
+    py = Path(summary_csv_year)
+    ensure_exists(py, "inspection summary CSV (by year)")
+
+    dfy = pd.read_csv(py).copy()
+    ensure_cols(dfy, ["nta", "year", "n_inspections", "n_unique_restaurants"], "summary CSV (by year)")
+    dfy["nta"] = clean_key(dfy["nta"])
+    dfy["year"] = pd.to_numeric(dfy["year"], errors="coerce")
+    to_numeric_inplace(dfy, ["n_inspections", "n_unique_restaurants"])
+    dfy = dfy.dropna(subset=["year"]).copy()
+
+    # annual intensity per NTA-year
+    dfy["intensity_year"] = dfy["n_inspections"] / dfy["n_unique_restaurants"]
+    dfy.loc[dfy["n_unique_restaurants"] == 0, "intensity_year"] = np.nan
+    dfy["intensity_year"] = dfy["intensity_year"].replace([np.inf, -np.inf], np.nan)
+
+    # weighted average across years (weights = unique restaurants in that year)
+    def _wavg(g: pd.DataFrame) -> float:
+        x = g["intensity_year"].to_numpy(dtype=float)
+        w = g["n_unique_restaurants"].to_numpy(dtype=float)
+        mask = np.isfinite(x) & np.isfinite(w) & (w > 0)
+        if mask.sum() == 0:
+            return np.nan
+        return float(np.average(x[mask], weights=w[mask]))
+
+    intensity_annual = (
+        dfy.groupby("nta", as_index=False)
+        .apply(lambda g: pd.Series({"inspection_intensity": _wavg(g)}))
+        .reset_index(drop=True)
+    )
+
+    # merge annualized intensity into base df
+    df = df.merge(intensity_annual, on="nta", how="left")
+
     return df
 
 
@@ -413,7 +456,7 @@ def scatter_altair(
 with st.spinner("Loading data..."):
     assert RAW_NTA_SHP is not None
     nta_gdf = load_nta_geometry(str(RAW_NTA_SHP))
-    summary_df = load_summary(str(SUMMARY_CSV))
+    summary_df = load_summary(str(SUMMARY_CSV), str(SUMMARY_CSV_YEAR))
     insp_df = load_inspections(str(INSP_PARQUET))
     nta_year = build_yearly_nta_panel(insp_df)
 
@@ -452,8 +495,8 @@ with col_left:
 
     else:
         value_col = "inspection_intensity"
-        title = "NYC NTA Inspection Intensity (Inspections per Restaurant)"
-        legend = "Inspections / restaurant"
+        title = f"NYC NTA {INTENSITY_LABEL}"
+        legend = INTENSITY_SHORT
         cmap_name = "cividis"
 
     st.markdown(f"**{title}**")
@@ -479,7 +522,7 @@ with col_right:
 
     VAR_LABELS = {
         "log_income": "Log Median Household Income",
-        "inspection_intensity": "Inspection Intensity (Inspections per Restaurant)",
+        "inspection_intensity": INTENSITY_LABEL,
         "avg_score": "Average Inspection Score (Higher = Worse)",
     }
 
@@ -517,7 +560,7 @@ with col_right:
 # 10) Year slider
 # =========================================================
 st.divider()
-st.subheader("Over time: Income vs Enforcement Intensity (by year)")
+st.subheader(f"Over time: Income vs {INTENSITY_LABEL} (by year)")
 
 years = sorted([int(y) for y in nta_year["year"].dropna().unique()])
 
@@ -535,7 +578,7 @@ if years:
     st.caption(f"Year = {year} | NTA rows = {len(sub):,}")
 
     st.markdown(
-        f"**Inspection Intensity (Inspections per Restaurant) vs Log Median Household Income (NTA)**  \n"
+        f"**{INTENSITY_LABEL} vs Log Median Household Income (NTA)**  \n"
         f"Year: **{year}**"
     )
 
@@ -546,7 +589,7 @@ if years:
             y="inspection_intensity",
             title="",
             x_label="Log Median Household Income",
-            y_label="Inspection Intensity (Inspections per Restaurant)",
+            y_label=INTENSITY_LABEL,
             x_domain=(10.0, 13.0),
             width=1100,
             height=380,
