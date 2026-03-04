@@ -18,21 +18,22 @@ import matplotlib.pyplot as plt
 import geopandas as gpd
 import altair as alt
 from IPython.display import display
-from __future__ import annotations
 import folium
 from folium.features import GeoJsonTooltip
 from branca.colormap import linear
 from branca.element import MacroElement
 from jinja2 import Template
 from branca.colormap import LinearColormap
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 ```
 
 
 
 ```{python}
-# =========================================================
-# 0) Paths & shared utilities  (RELATIVE PATHS ONLY)
-# =========================================================
+# ===================================================
+# 0) Paths & shared utilities  (RELATIVE PATHS)
+# ===================================================
 
 def ensure_exists(path: Path, what: str) -> None:
     if not path.exists():
@@ -102,9 +103,9 @@ print("OUTDIR       =", OUTDIR)
 
 
 ```{python}
-# =========================================================
+# ===========================
 # 1) Load NTA geometry
-# =========================================================
+# ===========================
 
 ensure_exists(RAW_NTA_SHP, "NTA shapefile")
 nta_gdf = gpd.read_file(RAW_NTA_SHP)
@@ -123,9 +124,9 @@ nta_gdf.head(2)
 
 
 ```{python}
-# =========================================================
+# ==================================================
 # 2) One generic Altair choropleth function
-# =========================================================
+# ==================================================
 
 def plot_nta_choropleth_altair(
     gdf: gpd.GeoDataFrame,
@@ -177,9 +178,9 @@ def plot_nta_choropleth_altair(
 
 
 ```{python}
-# =========================================================
+# ==============================================
 # Map 1: NYC NTA Median Household Income
-# =========================================================
+# ==============================================
 
 # =========
 # Helpers
@@ -328,11 +329,11 @@ def make_nta_income_map_with_fixed_scale(
     if not income_csv.exists():
         raise FileNotFoundError(f"Missing income CSV: {income_csv}")
 
-    # ----- Load -----
+    # ----- load -----
     nta = gpd.read_file(nta_shp)
     inc = pd.read_csv(income_csv)
 
-    # ----- Clean keys -----
+    # ----- clean keys -----
     if nta_code_col not in nta.columns:
         raise ValueError(f"'{nta_code_col}' not found in shapefile columns: {list(nta.columns)}")
     if "nta" not in inc.columns:
@@ -353,7 +354,7 @@ def make_nta_income_map_with_fixed_scale(
     gdf = nta.merge(inc[["nta", income_col]], on="nta", how="left").copy()
     gdf = gdf.to_crs(epsg=4326)
 
-    # ----- Center + bounds -----
+    # ----- center + bounds -----
     minx, miny, maxx, maxy = gdf.total_bounds
     center_lat = (miny + maxy) / 2
     center_lon = (minx + maxx) / 2
@@ -365,7 +366,7 @@ def make_nta_income_map_with_fixed_scale(
         control_scale=True,
     )
 
-    # ----- Fixed colormap -----
+    # ----- fixed colormap -----
     vmin, vmax = float(FIX_MIN), float(FIX_MAX)
     cmap = _make_viridis_colormap(vmin, vmax)
     ticks = list(range(FIX_MIN, FIX_MAX + 1, TICK_STEP))
@@ -378,7 +379,7 @@ def make_nta_income_map_with_fixed_scale(
         vv = min(max(vv, vmin), vmax)
         return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.78}
 
-    # ----- NTA layer (tooltip: NTA + income) -----
+    # ----- NTA layer -----
     folium.GeoJson(
         data=gdf.__geo_interface__,
         name="NTA income",
@@ -392,7 +393,7 @@ def make_nta_income_map_with_fixed_scale(
         ),
     ).add_to(m)
 
-    # ----- Borough boundaries + labels -----
+    # ----- borough boundaries + labels -----
     boro_col = _guess_borough_col(gdf)
     if boro_col is not None:
         boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
@@ -428,7 +429,7 @@ def make_nta_income_map_with_fixed_scale(
                 ),
             ).add_to(m)
 
-    # ----- Legend (TOP-RIGHT, not clipped) -----
+    # ----- legend -----
     _add_fixed_legend_topright(
         m=m,
         cmap=cmap,
@@ -481,9 +482,6 @@ m
 # Colormap helper
 # ===================
 def _make_reds_colormap(vmin: float, vmax: float):
-    """
-    Score higher = worse (higher risk). Reds: darker = worse.
-    """
     for candidate in ["Reds_09", "Reds_08", "Reds_07", "Reds_06", "Reds_05", "Reds"]:
         if hasattr(linear, candidate):
             return getattr(linear, candidate).scale(vmin, vmax)
@@ -496,9 +494,6 @@ def _make_reds_colormap(vmin: float, vmax: float):
 
 
 def _guess_avg_score_col(df: pd.DataFrame) -> str:
-    """
-    Infer the 'average inspection score' column name from nta_inspection_summary.csv.
-    """
     cols = list(df.columns)
     cols_l = [c.lower() for c in cols]
 
@@ -536,21 +531,16 @@ def _guess_avg_score_col(df: pd.DataFrame) -> str:
 # Map 2 function
 # =================
 def make_nta_foodrisk_map_with_fixed_scale(
-    # --- RELATIVE PATHS ONLY (from your 0) block) ---
     nta_shp: Path = RAW_NTA_SHP,
-    score_csv: Path = SUMMARY_CSV,  # ../data/derived-data/nta_inspection_summary.csv
+    score_csv: Path = SUMMARY_CSV,
     out_html: Path = OUTDIR / "map2_food_safety_risk_avgscore_fixedscale.html",
-    # --- columns ---
     nta_code_col: str = "nta2020",
-    score_col: str | None = None,  # if None, auto-infer from CSV
-    # --- map ---
+    score_col: str | None = None,
     tiles: str = "CartoDB positron",
     zoom_start: int = 10,
-    # --- fixed scale to match your screenshot ---
     FIX_MIN: int = 10,
     FIX_MAX: int = 40,
     TICK_STEP: int = 10,
-    # --- legend styling ---
     legend_box_width: int = 420,
     legend_title_size: int = 14,
     legend_tick_size: int = 10,
@@ -558,25 +548,24 @@ def make_nta_foodrisk_map_with_fixed_scale(
     legend_top_offset_px: int = 20,
     legend_right_offset_px: int = 20,
 ) -> folium.Map:
-    # ----- Existence checks (relative paths) -----
     ensure_exists(nta_shp, "NTA shapefile")
     ensure_exists(score_csv, "inspection summary CSV")
 
-    # ----- Load -----
+    # ----- load -----
     nta = gpd.read_file(nta_shp)
     sc = pd.read_csv(score_csv)
 
-    # ----- Validate columns -----
+    # ----- validate columns -----
     ensure_cols(nta, [nta_code_col], "NTA shapefile")
     ensure_cols(sc, ["nta"], "Inspection summary CSV")
 
-    # choose score column
+    # ----- choose score column -----
     if score_col is None:
         score_col = _guess_avg_score_col(sc)
 
     ensure_cols(sc, ["nta", score_col], "Inspection summary CSV (after choosing score_col)")
 
-    # ----- Clean keys & score -----
+    # ----- clean keys & score -----
     nta = nta.copy()
     nta["nta"] = clean_key(nta[nta_code_col])
 
@@ -590,11 +579,11 @@ def make_nta_foodrisk_map_with_fixed_scale(
     )
     sc[score_col] = pd.to_numeric(sc[score_col], errors="coerce")
 
-    # ----- Merge + CRS -----
+    # ----- merge + CRS -----
     gdf = nta.merge(sc[["nta", score_col]], on="nta", how="left").copy()
     gdf = gdf.to_crs(epsg=4326)
 
-    # ----- Center + bounds -----
+    # ----- center + bounds -----
     minx, miny, maxx, maxy = gdf.total_bounds
     center_lat = (miny + maxy) / 2
     center_lon = (minx + maxx) / 2
@@ -606,7 +595,7 @@ def make_nta_foodrisk_map_with_fixed_scale(
         control_scale=True,
     )
 
-    # ----- Fixed colormap -----
+    # ----- fixed colormap -----
     vmin, vmax = float(FIX_MIN), float(FIX_MAX)
     cmap = _make_reds_colormap(vmin, vmax)
     ticks = list(range(FIX_MIN, FIX_MAX + 1, TICK_STEP))
@@ -616,10 +605,10 @@ def make_nta_foodrisk_map_with_fixed_scale(
         if v is None or pd.isna(v):
             return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
         vv = float(v)
-        vv = min(max(vv, vmin), vmax)  # clamp
+        vv = min(max(vv, vmin), vmax)
         return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.78}
 
-    # ----- NTA layer (tooltip: NTA + avg score) -----
+    # ----- NTA layer -----
     folium.GeoJson(
         data=gdf.__geo_interface__,
         name="NTA risk (avg score)",
@@ -633,7 +622,7 @@ def make_nta_foodrisk_map_with_fixed_scale(
         ),
     ).add_to(m)
 
-    # ----- Borough boundaries + labels (Map1 logic; interactive=False prevents hover stealing) -----
+    # ----- borough boundaries + labels -----
     boro_col = _guess_borough_col(gdf)
     if boro_col is not None:
         boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
@@ -669,7 +658,7 @@ def make_nta_foodrisk_map_with_fixed_scale(
                 ),
             ).add_to(m)
 
-    # ----- Legend (TOP-RIGHT, not clipped) -----
+    # ----- legend -----
     _add_fixed_legend_topright(
         m=m,
         cmap=cmap,
@@ -687,7 +676,6 @@ def make_nta_foodrisk_map_with_fixed_scale(
     folium.LayerControl(collapsed=True).add_to(m)
     m.fit_bounds([[miny, minx], [maxy, maxx]])
 
-    # ----- Save (relative path) -----
     out_html.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(out_html))
     print("Saved:", out_html)
@@ -695,7 +683,6 @@ def make_nta_foodrisk_map_with_fixed_scale(
     print(f"Fixed scale: [{FIX_MIN:,}, {FIX_MAX:,}] step {TICK_STEP:,}")
 
     return m
-
 
 # =========================
 # Notebook / QMD usage
@@ -722,24 +709,15 @@ m2
 # Map 3: NYC NTA Restaurant Inspection Intensity
 # ==================================================
 
-# ================
-# Custom colormap
-# ================
-def _make_blue_gray_yellow_colormap(vmin: float, vmax: float):
-    return LinearColormap(
-        colors=[
-            "#0b3c78",  # deep blue (low)
-            "#8e8e8e",  # gray (mid)
-            "#f2d74e",  # yellow (high)
-        ],
-        vmin=vmin,
-        vmax=vmax,
-    )
+def _make_cividis_colormap(vmin: float, vmax: float):
+    mpl_cmap = cm.get_cmap("cividis")
+    colors = [mcolors.to_hex(mpl_cmap(i / 255.0)) for i in range(256)]
+    return LinearColormap(colors=colors, vmin=vmin, vmax=vmax)
 
 
-def make_nta_inspection_intensity_map_with_fixed_scale(
+def make_nta_inspection_intensity_map_fixedscale_cividis(
     nta_shp: Path = RAW_NTA_SHP,
-    summary_csv: Path = SUMMARY_CSV,
+    summary_csv: Path = SUMMARY_CSV_YEAR,
     out_html: Path = OUTDIR / "map3_inspection_intensity_fixedscale.html",
     nta_code_col: str = "nta2020",
     n_inspections_col: str = "n_inspections",
@@ -747,8 +725,8 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
     tiles: str = "CartoDB positron",
     zoom_start: int = 10,
     FIX_MIN: float = 2.0,
-    FIX_MAX: float = 14.0,
-    TICK_STEP: float = 2.0,
+    FIX_MAX: float = 6.0,
+    TICK_STEP: float = 1.0,
     legend_box_width: int = 420,
     legend_title_size: int = 14,
     legend_tick_size: int = 10,
@@ -757,18 +735,18 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
     legend_right_offset_px: int = 20,
 ) -> folium.Map:
 
-    # ----- Existence checks -----
+    # ----- checks -----
     ensure_exists(nta_shp, "NTA shapefile")
     ensure_exists(summary_csv, "inspection summary CSV")
 
-    # ----- Load -----
+    # ----- load -----
     nta = gpd.read_file(nta_shp)
     summ = pd.read_csv(summary_csv)
 
     ensure_cols(nta, [nta_code_col], "NTA shapefile")
     ensure_cols(summ, ["nta", n_inspections_col, n_unique_restaurants_col], "summary CSV")
 
-    # ----- Clean keys -----
+    # ----- clean keys -----
     nta = nta.copy()
     nta["nta"] = clean_key(nta[nta_code_col])
 
@@ -776,19 +754,16 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
     summ["nta"] = clean_key(summ["nta"])
     to_numeric_inplace(summ, [n_inspections_col, n_unique_restaurants_col])
 
-    # ----- Compute intensity (year-normalized if 'year' column exists) -----
+    # ----- compute year-normalized intensity -----
     if "year" in summ.columns:
         summ["year"] = pd.to_numeric(summ["year"], errors="coerce")
         summ = summ.dropna(subset=["year"]).copy()
 
-        # annual intensity per NTA-year
         summ["intensity_year"] = summ[n_inspections_col] / summ[n_unique_restaurants_col]
         summ.loc[summ[n_unique_restaurants_col] == 0, "intensity_year"] = np.nan
         summ["intensity_year"] = summ["intensity_year"].replace([np.inf, -np.inf], np.nan)
 
-        # collapse to ONE value per NTA for mapping:
-        # weighted average across years, weights = number of unique restaurants in that year
-        def _wavg(g: pd.DataFrame) -> float:
+        def _wavg(g):
             x = g["intensity_year"].to_numpy(dtype=float)
             w = g[n_unique_restaurants_col].to_numpy(dtype=float)
             mask = np.isfinite(x) & np.isfinite(w) & (w > 0)
@@ -796,29 +771,26 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
                 return np.nan
             return float(np.average(x[mask], weights=w[mask]))
 
-        # totals for tooltip consistency (across all years)
-        summ_totals = (
+        totals = (
             summ.groupby("nta", as_index=False)
-            .agg(
-                **{
-                    n_inspections_col: (n_inspections_col, "sum"),
-                    n_unique_restaurants_col: (n_unique_restaurants_col, "sum"),
-                }
-            )
+                .agg(
+                    **{
+                        n_inspections_col: (n_inspections_col, "sum"),
+                        n_unique_restaurants_col: (n_unique_restaurants_col, "sum"),
+                    }
+                )
         )
 
         wavg_series = summ.groupby("nta", as_index=True).apply(_wavg)
-        summ_totals["inspection_intensity"] = summ_totals["nta"].map(wavg_series)
-
-        summ = summ_totals
+        totals["inspection_intensity"] = totals["nta"].map(wavg_series)
+        summ = totals
 
     else:
-        # fallback: original cumulative intensity (no year info)
         summ["inspection_intensity"] = summ[n_inspections_col] / summ[n_unique_restaurants_col]
         summ.loc[summ[n_unique_restaurants_col] == 0, "inspection_intensity"] = np.nan
         summ["inspection_intensity"] = summ["inspection_intensity"].replace([np.inf, -np.inf], np.nan)
 
-    # ----- Merge + CRS -----
+    # ----- merge + CRS -----
     gdf = nta.merge(
         summ[["nta", "inspection_intensity", n_inspections_col, n_unique_restaurants_col]],
         on="nta",
@@ -826,15 +798,9 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
     ).copy()
     gdf = gdf.to_crs(epsg=4326)
 
-    print(
-        "Share missing intensity after merge:",
-        f"{gdf['inspection_intensity'].isna().mean():.2%}"
-    )
-
-    # ----- Center + bounds -----
+    # ----- map base -----
     minx, miny, maxx, maxy = gdf.total_bounds
-    center_lat = (miny + maxy) / 2
-    center_lon = (minx + maxx) / 2
+    center_lat, center_lon = (miny + maxy) / 2, (minx + maxx) / 2
 
     m = folium.Map(
         location=[center_lat, center_lon],
@@ -843,20 +809,20 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
         control_scale=True,
     )
 
-    # ----- Fixed scale + colormap -----
+    # ----- fixed scale + CIVIDIS colormap -----
     vmin, vmax = float(FIX_MIN), float(FIX_MAX)
-    cmap = _make_blue_gray_yellow_colormap(vmin, vmax)
-    ticks = list(range(int(vmin), int(vmax) + 1, int(TICK_STEP)))
+    cmap = _make_cividis_colormap(vmin, vmax)
+    ticks = [int(x) for x in np.arange(vmin, vmax + 1e-9, TICK_STEP)]
 
     def style_fn(feat):
         v = feat["properties"].get("inspection_intensity", None)
         if v is None or pd.isna(v):
             return {"fillColor": "#d9d9d9", "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.55}
         vv = float(v)
-        vv = min(max(vv, vmin), vmax)
+        vv = min(max(vv, vmin), vmax)   # clip
         return {"fillColor": cmap(vv), "color": "#ffffff", "weight": 0.6, "fillOpacity": 0.82}
 
-    # ----- NTA layer (tooltip includes borough name if present) -----
+    # ----- add NTA layer -----
     folium.GeoJson(
         data=gdf.__geo_interface__,
         name="Inspection intensity",
@@ -870,12 +836,11 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
         ),
     ).add_to(m)
 
-    # ----- Borough boundaries + labels (same as Map2, plus text labels) -----
+    # ----- borough boundaries + labels -----
     boro_col = _guess_borough_col(gdf)
     if boro_col is not None:
         boro = gdf.dissolve(by=boro_col, as_index=False)[[boro_col, "geometry"]].copy()
 
-        # boundaries: non-interactive so it won't steal hover
         folium.GeoJson(
             data=boro.__geo_interface__,
             name="Borough boundaries",
@@ -887,7 +852,6 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
             },
         ).add_to(m)
 
-        # labels: place borough name at centroid (note: centroid in EPSG:4326 is fine here)
         boro_centroids = boro.copy()
         boro_centroids["centroid"] = boro_centroids.geometry.centroid
 
@@ -895,7 +859,6 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
             name = str(row[boro_col])
             lat = float(row["centroid"].y)
             lon = float(row["centroid"].x)
-
             folium.Marker(
                 location=[lat, lon],
                 icon=folium.DivIcon(
@@ -911,12 +874,12 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
                 ),
             ).add_to(m)
 
-    # ----- Legend -----
+    # ----- legend -----
     _add_fixed_legend_topright(
         m=m,
         cmap=cmap,
         ticks=ticks,
-        caption="Inspections / Restaurant",
+        caption="Inspections / restaurant / year",
         box_width=legend_box_width,
         title_size=legend_title_size,
         tick_size=legend_tick_size,
@@ -929,7 +892,7 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
     folium.LayerControl(collapsed=True).add_to(m)
     m.fit_bounds([[miny, minx], [maxy, maxx]])
 
-    # ----- Save -----
+    # ----- save -----
     out_html.parent.mkdir(parents=True, exist_ok=True)
     m.save(str(out_html))
     print("Saved:", out_html)
@@ -938,15 +901,15 @@ def make_nta_inspection_intensity_map_with_fixed_scale(
     return m
 
 
-# =========================
-# Run (QMD / Notebook)
-# =========================
-m3 = make_nta_inspection_intensity_map_with_fixed_scale(
-    summary_csv=SUMMARY_CSV_YEAR,  
+# ==========
+# Run
+# ==========
+m3 = make_nta_inspection_intensity_map_fixedscale_cividis(
+    summary_csv=SUMMARY_CSV_YEAR,
     out_html=OUTDIR / "map3_inspection_intensity_fixedscale.html",
     FIX_MIN=2,
-    FIX_MAX=14,
-    TICK_STEP=2,
+    FIX_MAX=6,
+    TICK_STEP=1,
     legend_box_width=420,
     legend_title_size=14,
     legend_tick_size=10,
@@ -960,9 +923,9 @@ m3
 
 
 ```{python}
-# =============================================
+# ====================
 # 4) Scatter Plots
-# =============================================
+# ====================
 
 def save_chart_html(chart: alt.Chart, outdir: Path, filename: str) -> Path:
     """Save Altair chart as HTML (always). Return saved path."""
@@ -1008,7 +971,6 @@ def _boxed_annotation(
 ) -> alt.LayerChart:
     label = f"β̂ = {slope:.3f}"
 
-    # tighter width estimate
     box_w = pad_lr * 2 + est_char_px * len(label)
 
     box_x = width - pad_right
@@ -1066,11 +1028,6 @@ def scatter_with_fit_altair(
     width: int = 720,
     height: int = 440,
 ) -> alt.Chart:
-    """
-    Scatter + OLS regression line (red) + boxed β̂ at bottom-right.
-    Optional forced x-axis domain/ticks.
-    Save as HTML and return chart (for Quarto display).
-    """
     if x not in d.columns or y not in d.columns:
         raise ValueError(f"scatter_with_fit_altair needs columns: {x}, {y}")
 
@@ -1100,7 +1057,6 @@ def scatter_with_fit_altair(
         ],
     )
 
-    # regression line in red
     line = (
         base
         .transform_regression(x, y)
@@ -1167,9 +1123,8 @@ def scatter_with_fit_altair_simple(
     save_chart_html(chart, OUTDIR, out_html)
     return chart
 
-# ------------------- Load data & build charts -------------------
+# ----- Load data & build charts -----
 
-# (A) Base NTA summary (one row per NTA): keep income + avg_score here
 df = pd.read_csv(SUMMARY_CSV).copy()
 ensure_cols(
     df,
@@ -1179,7 +1134,6 @@ ensure_cols(
 df["nta"] = clean_key(df["nta"])
 to_numeric_inplace(df, ["median_income_proxy", "avg_score"])
 
-# (B) Year-by-year summary: build annual-normalized intensity, then collapse to one value per NTA
 dfy = pd.read_csv(SUMMARY_CSV_YEAR).copy()
 ensure_cols(
     dfy,
@@ -1191,7 +1145,6 @@ dfy["year"] = pd.to_numeric(dfy["year"], errors="coerce")
 to_numeric_inplace(dfy, ["n_inspections", "n_unique_restaurants"])
 dfy = dfy.dropna(subset=["year"])
 
-# annual intensity per NTA-year
 dfy["intensity_year"] = dfy["n_inspections"] / dfy["n_unique_restaurants"]
 dfy.loc[dfy["n_unique_restaurants"] == 0, "intensity_year"] = np.nan
 dfy["intensity_year"] = dfy["intensity_year"].replace([np.inf, -np.inf], np.nan)
@@ -1210,46 +1163,44 @@ intensity_annual = (
     .reset_index(drop=True)
 )
 
-# merge annual-normalized intensity into base df
 df = df.merge(intensity_annual, on="nta", how="left")
 
-# log income
-df = safe_log_income(df, "median_income_proxy")  # creates df["log_income"]
+df = safe_log_income(df, "median_income_proxy")
 
-# ---- Scatter 1: log income vs annual-normalized intensity ----
+# ---- Scatter plot 1 ----
 chart_scatter_income_intensity = scatter_with_fit_altair(
     df,
     x="log_income",
     y="inspection_intensity",
     xlabel="Log Median Household Income",
-    ylabel="Annual Inspection Intensity (Avg across years)",
-    title="Income and Annual-Normalized Inspection Intensity Across NYC NTAs",
+    ylabel="Inspection Intensity (Inspections per Restaurants per Year)",
+    title="Income and Inspection Intensity Across NYC NTAs",
     out_html="scatter_income_vs_intensity_annual.html",
     x_domain=(10, 13),
     x_ticks=[10, 11, 12, 13],
 )
 
-# ---- Scatter 2: log income vs avg score ----
+# ---- Scatter plot 2 ----
 chart_scatter_income_score = scatter_with_fit_altair(
     df,
     x="log_income",
     y="avg_score",
     xlabel="Log Median Household Income",
-    ylabel="Average Inspection Score (higher = worse)",
+    ylabel="Average Inspection Score (Higher = Worse)",
     title="Income and Food Safety Risk Measured by Average Score (NTA)",
     out_html="scatter_income_vs_score.html",
     x_domain=(10, 13),
     x_ticks=[10, 11, 12, 13],
 )
 
-# ---- Scatter 3: annual-normalized intensity vs avg score ----
+# ---- Scatter plot 3 ----
 chart_scatter_intensity_score = scatter_with_fit_altair_simple(
     df,
     x="inspection_intensity",
     y="avg_score",
-    xlabel="Annual Inspection Intensity (Avg across years)",
-    ylabel="Average Inspection Score (higher = worse)",
-    title="Annual-Normalized Inspection Intensity and Food Safety Risk (NTA)",
+    xlabel="Inspection Intensity (Inspections per Restaurants per Year)",
+    ylabel="Average Inspection Score (Higher = Worse)",
+    title="Inspection Intensity and Food Safety Risk Measured by Average Score (NTA)",
     out_html="scatter_intensity_vs_score_annual.html",
 )
 
@@ -1265,13 +1216,25 @@ display(chart_scatter_intensity_score)
 # 5) Stacked bar: income quintile vs inspection stage
 # ====================================================
 
-def extract_stage(inspection_type: pd.Series) -> pd.Series:
+def extract_stage_raw(inspection_type: pd.Series) -> pd.Series:
+    """Extract the part after '/' in INSPECTION TYPE, e.g. 'Initial Inspection'."""
     split = inspection_type.astype(str).str.split("/", n=1, expand=True)
     if split.shape[1] == 2:
         stage = split[1].str.strip()
         stage = stage.where(stage.notna() & (stage != ""), "Unknown")
         return stage
     return pd.Series(["Unknown"] * len(inspection_type), index=inspection_type.index)
+
+
+def compress_stage(stage_raw: pd.Series) -> pd.Series:
+    s = stage_raw.astype(str).str.strip()
+    s_low = s.str.lower()
+    is_initial = s_low.eq("initial inspection")
+    is_re = s_low.isin(["re-inspection", "reinspection", "re inspection"])
+    out = pd.Series("Other", index=s.index)
+    out[is_initial] = "Initial Inspection"
+    out[is_re] = "Re-inspection"
+    return out
 
 
 ensure_exists(INSP_PARQUET, "inspections parquet")
@@ -1290,10 +1253,8 @@ insp["income_quintile"] = pd.qcut(
     labels=quintile_labels,
 )
 
-insp["inspection_stage"] = extract_stage(insp["INSPECTION TYPE"])
-
-top_stages = insp["inspection_stage"].value_counts().index[:5]
-insp["inspection_stage"] = insp["inspection_stage"].where(insp["inspection_stage"].isin(top_stages), "Other")
+insp["inspection_stage_raw"] = extract_stage_raw(insp["INSPECTION TYPE"])
+insp["inspection_stage"] = compress_stage(insp["inspection_stage_raw"])
 
 stage_share = (
     insp.groupby(["income_quintile", "inspection_stage"], observed=True)
@@ -1302,26 +1263,17 @@ stage_share = (
 )
 stage_share["share"] = stage_share.groupby("income_quintile", observed=True)["n"].transform(lambda s: s / s.sum())
 
-# -------------------- NEW: legend order by total share (large -> small) --------------------
-stage_totals = stage_share.groupby("inspection_stage", as_index=False)["n"].sum()
-stage_totals["share_total"] = stage_totals["n"] / stage_totals["n"].sum()
+stage_order = ["Initial Inspection", "Re-inspection", "Other"]
+rank_map = {"Initial Inspection": 1, "Re-inspection": 2, "Other": 0}
 
-# This order controls BOTH legend order and stack order
-stage_order = (
-    stage_totals.sort_values("share_total", ascending=False)["inspection_stage"]
-    .tolist()
-)
-
-rank_map = {stage: i for i, stage in enumerate(stage_order)}
 stage_share["stage_rank"] = stage_share["inspection_stage"].map(rank_map).astype(int)
 
-# labels only for two stages
 label_stages = ["Initial Inspection", "Re-inspection"]
 label_df = stage_share[stage_share["inspection_stage"].isin(label_stages)].copy()
 label_df["share_pct_1d"] = (label_df["share"] * 100).round(1).map(lambda v: f"{v:.1f}%")
 label_df["stage_rank"] = label_df["inspection_stage"].map(rank_map).astype(int)
 
-# -------------------- Chart --------------------
+# ----- chart -----
 sort_quintiles = quintile_labels
 
 base = alt.Chart(stage_share).properties(
@@ -1342,6 +1294,15 @@ x_enc = alt.X(
     axis=alt.Axis(labelAngle=0),
 )
 
+stage_color_scale = alt.Scale(
+    domain=stage_order,
+    range=[
+        "#9ecae1",
+        "#2171b5",
+        "#bdbdbd",
+    ],
+)
+
 bars = base.mark_bar().encode(
     x=x_enc,
     y=alt.Y("share:Q", title="Share of Inspections", axis=alt.Axis(format="%")),
@@ -1349,6 +1310,8 @@ bars = base.mark_bar().encode(
         "inspection_stage:N",
         title="Inspection Stage",
         sort=stage_order,
+        scale=stage_color_scale,
+        legend=alt.Legend(orient="right"),
     ),
     order=alt.Order("stage_rank:Q"),
     tooltip=[
@@ -1438,13 +1401,13 @@ csvpath = OUTDIR / "trend_slope_intensity_on_income_by_year.csv"
 slopes.to_csv(csvpath, index=False)
 print("[Saved]", csvpath)
 
-# ---- Main line chart ----
+# ---- main line chart ----
 chart_trend = (
     alt.Chart(slopes)
     .mark_line()
     .encode(
         x=alt.X("year:O", title="Year", axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("slope:Q", title="Slope of intensity ~ log_income"),
+        y=alt.Y("slope:Q", title="Income and Inspection Intensity Relationship (Slope)"),
         tooltip=[
             alt.Tooltip("year:O", title="Year"),
             alt.Tooltip("slope:Q", title="Slope", format=",.4f"),
@@ -1463,7 +1426,7 @@ chart_trend = (
     )
 )
 
-# ---- Points ----
+# ---- points ----
 points = (
     alt.Chart(slopes)
     .mark_circle(size=60)
@@ -1478,7 +1441,7 @@ points = (
     )
 )
 
-# ---- 0 reference line: red dashed ----
+# ---- 0 reference line ----
 zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
     color="red",
     strokeWidth=2,

@@ -3,12 +3,9 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 
-# =========================================================
+# =====================
 # Relative paths 
-# =========================================================
-
-# preprocessing.py lives in: final_project/code/
-# so repo root is one level up
+# =====================
 
 REPO = Path("..")
 
@@ -32,7 +29,6 @@ def read_acs_households(path: Path) -> pd.DataFrame:
     Expect columns like: GEO_ID, NAME, B11001_001E ...
     """
     df = pd.read_csv(path, dtype=str)
-    # keep header row that has actual data (ACS files already ok)
     df["geoid"] = df["GEO_ID"].str.extract(r"US(\d+)$")[0]
     df["households"] = pd.to_numeric(df["B11001_001E"], errors="coerce")
     return df[["geoid", "households"]]
@@ -79,7 +75,6 @@ def attach_acs_to_tracts(tracts: gpd.GeoDataFrame, acs: pd.DataFrame) -> gpd.Geo
     """
     Attribute join ACS (tract-level) onto tract polygons by geoid.
     """
-
     tract_candidates = ["geoid", "GEOID", "GEO_ID"]
     tract_geoid = next((c for c in tract_candidates if c in tracts.columns), None)
 
@@ -107,13 +102,11 @@ def compute_nta_income_households_from_tracts(
     Note: Median is not strictly aggregatable. A common approximation is household-weighted mean of tract medians.
     (You should mention this limitation in writeup.)
     """
-    # Use an equal-area projection for accurate area/intersection
-    # EPSG:2263 (NAD83 / New York Long Island) is common for NYC
     target_crs = "EPSG:2263"
     tr = tracts_with_acs.to_crs(target_crs).copy()
     nt = ntas.to_crs(target_crs).copy()
 
-    # Clean missing
+    # clean missing
     tr["households"] = pd.to_numeric(tr["households"], errors="coerce")
     tr["median_income"] = pd.to_numeric(tr["median_income"], errors="coerce")
     tr = tr[(tr["households"] > 0) & (tr["median_income"].notna())].copy()
@@ -132,10 +125,10 @@ def compute_nta_income_households_from_tracts(
     inter["inter_area"] = inter.geometry.area
     inter["area_share"] = inter["inter_area"] / inter["tract_area"]
 
-    # Allocate households to each piece by area share
+    # allocate households to each piece by area share
     inter["hh_alloc"] = inter["households"] * inter["area_share"]
 
-    # compute weighted sum safely
+    # compute weighted sum
     inter["income_hh"] = inter["median_income"] * inter["hh_alloc"]
     tmp = inter.groupby("nta", as_index=False).agg(
         households=("hh_alloc", "sum"),
@@ -154,13 +147,11 @@ def load_inspections_points(path: Path) -> gpd.GeoDataFrame:
     """
     df = pd.read_csv(path)
 
-    # Parse dates, handle 1900-01-01 placeholder
     if "INSPECTION DATE" in df.columns:
         df["inspection_date"] = pd.to_datetime(df["INSPECTION DATE"], errors="coerce")
         df = df[df["inspection_date"].notna()].copy()
         df = df[df["inspection_date"] != pd.Timestamp("1900-01-01")].copy()
 
-    # Ensure numeric lat/lon
     df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
     df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
     df = df.dropna(subset=["Latitude", "Longitude"]).copy()
@@ -177,16 +168,14 @@ def assign_nta_to_inspections(inspections: gpd.GeoDataFrame, ntas: gpd.GeoDataFr
     """
     Spatial join points → NTA.
     """
-    # project both to same CRS for sjoin
     nt = ntas.to_crs(inspections.crs)
     joined = gpd.sjoin(inspections, nt[["nta", "geometry"]], how="left", predicate="within")
-    # geopandas adds index_right
     joined = joined.drop(columns=[c for c in ["index_right"] if c in joined.columns])
     return joined
 
 
 def main():
-    # ---- Paths (yours) ----
+    # ---- Paths ----
     inspections_path = RAW / "inspections_nyc.csv"
 
     nta_shp = RAW / "nta_2020" / "nta_2020.shp"  
@@ -218,16 +207,12 @@ def main():
     nta_demo_out = DERIVED / "nta_income_households_2024.csv"
     nta_demo.to_csv(nta_demo_out, index=False)
 
-    # ---- 4) Assign NTA to inspections (keep point-level) ----
+    # ---- 4) Assign NTA to inspections ----
     insp = load_inspections_points(inspections_path)
 
-    # keep original NTA column if exists, but also create nta_from_geom
     insp_joined = assign_nta_to_inspections(insp, ntas)
     insp_joined = insp_joined.rename(columns={"nta": "nta_from_geom"})
 
-    # If your CSV already has 'NTA' code column, keep it too:
-    # (In your screenshot there's a column named 'NTA' near the end.)
-    # We'll also create a final nta column preferring geometry-based.
     if "NTA" in insp_joined.columns:
         insp_joined["nta_from_file"] = insp_joined["NTA"].astype(str)
     else:
@@ -238,12 +223,10 @@ def main():
     # ---- 5) Merge NTA demographics back onto each inspection ----
     insp_final = insp_joined.merge(nta_demo, on="nta", how="left")
 
-    # Save point-level
+    # save point-level
     insp_out = DERIVED / "inspections_with_nta_income.parquet"
     insp_final.to_parquet(insp_out, index=False)
 
-    # Optional: NTA-level inspection summary
-    # (you can add year/month later)
     if "SCORE" in insp_final.columns:
         insp_final["SCORE"] = pd.to_numeric(insp_final["SCORE"], errors="coerce")
     if "GRADE" in insp_final.columns:

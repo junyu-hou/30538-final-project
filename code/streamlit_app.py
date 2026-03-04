@@ -1,22 +1,14 @@
-# streamlit_app.py (PyDeck with CARTO basemap, no Mapbox token needed)
-# Save to: final_project/code/streamlit_app.py
-# Run (from repo root): streamlit run code/streamlit_app.py
-
 from __future__ import annotations
-
 from pathlib import Path
 import json
 import zipfile
-
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 import altair as alt
 import streamlit as st
 import pydeck as pdk
-
 import requests
-
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -91,7 +83,6 @@ def download_and_extract_zip(url: str, zip_dst: Path, extract_to: Path, label: s
     """
     extract_to.mkdir(parents=True, exist_ok=True)
 
-    # If we already have a shp somewhere inside extract_to, skip.
     if any(extract_to.rglob("*.shp")):
         return
 
@@ -122,7 +113,7 @@ def find_shapefile(root: Path, preferred_name: str = "nta_2020.shp") -> Path:
 # 1) Paths
 # =========================================================
 THIS_FILE = Path(__file__).resolve()
-REPO = THIS_FILE.parents[1]  # .../final_project (because this file is in .../final_project/code/)
+REPO = THIS_FILE.parents[1]
 
 DERIVED = REPO / "data" / "derived-data"
 RAW_DIR = REPO / "data" / "raw-data"
