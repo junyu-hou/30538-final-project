@@ -1,0 +1,2 @@
+Data used to deploy the streamlit app is in the Git Release.
+Link: https://github.com/junyu-hou/30538-final-project/releases/tag/v1.0-data
