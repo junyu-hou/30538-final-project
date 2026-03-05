@@ -81,6 +81,7 @@ Inspection records are cleaned in three main steps:
 
 ### 4. Derived Outputs
 Processed datasets will be saved to: data/derived-data/
+
 Outputs include:
 
 - A point-level integrated dataset (inspections_with_nta_income.parquet)
@@ -90,6 +91,7 @@ Outputs include:
 
 ## 4. Static Plots
 Static plots are generated using: code/static_plots.qmd
+
 They include 3 maps, s scatter pots, 1 stcaked bar chart, and 1 line chart:
 
 1. NYC Income Map (Median Household Income by NTA)
@@ -104,6 +106,7 @@ They include 3 maps, s scatter pots, 1 stcaked bar chart, and 1 line chart:
 
 ## 5. Streamlit Dashboard
 Git Release is used when deploy the Streamlit
+
 The interactive dashboard allows users to:
 
 - Switch between three NTA-level choropleth maps.
