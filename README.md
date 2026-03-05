@@ -39,11 +39,10 @@ Reproducibility Instructions:
 
 1. Clone the repository
 2. Create environment and install dependencies
-3. To reproduce the project, run under final_project/code:
-
-- python preprocessing.py
-- python static_plots.qmd
-- streamlit run streamlit_app.py
+3. Run the pipeline: 
+- python code/preprocessing.py
+- quarto render code/static_plots.qmd
+- streamlit run streamlit-app/streamlit_app.py
 
 
 ## 3. Data Processing Pipeline
