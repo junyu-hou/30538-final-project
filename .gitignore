@@ -10,6 +10,7 @@ venv/
 env/
 
 writeup_files/
+final_project_files/
 /code/plot_files/
 
 # ---- data ----
