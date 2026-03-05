@@ -184,7 +184,7 @@ We focus the time-trend analysis on the income–inspection intensity slope beca
 
 # Streamlit Application
 
-[Streamlit App Link](https://30538-final-project-phshfr3n9aqnepymn6buyq.streamlit.app)
+[Streamlit App Link](https://30538-final-project-h9h7wqmhtuwhwh8nndhnv4.streamlit.app)
 
 We developed an interactive Streamlit application to allow users to explore the spatial distribution of restaurant inspection enforcement and outcomes across New York City NTAs. The app integrates maps, scatter plots, and summary statistics to visualize the relationships between neighborhood income, inspection intensity, and inspection outcomes.
 
